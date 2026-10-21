@@ -69,8 +69,36 @@ Verify service health at:
 - `http://localhost:8000/health` -> `{"status": "ok"}`
 - `http://localhost:8000/docs` -> Interactive OpenAPI documentation
 
-
 ---
+
+## 📡 API Reference & Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/runs` | Upload resume (PDF) & optional marksheet + form inputs. Launches background swarm run. |
+| `GET` | `/api/runs/{run_id}/events` | Server-Sent Events (SSE) stream delivering event replay and live agent updates. |
+| `GET` | `/api/runs/{run_id}` | Retrieve run status, metadata, and full compiled `RunResult`. |
+| `GET` | `/api/runs` | Retrieve chronological history of all previous runs saved to disk. |
+| `POST` | `/api/runs/{run_id}/rerun` | Re-run a previous student profile using saved documents with edited form fields. |
+| `GET` | `/api/runs/{run_id}/report.md` | Download or view the consultant-grade Markdown advisory report. |
+| `GET` | `/api/runs/{run_id}/trace.json` | Complete execution audit trace containing all agent events and telemetry metrics. |
+| `GET` | `/api/status` | Configuration check returning readiness booleans (never exposes secret keys). |
+
+### Core Environment Variables
+
+```bash
+# LLM Configuration (Google Gemini)
+GEMINI_API_KEY=your_key_here
+GEMINI_MODEL=gemini-2.5-flash
+GEMINI_FALLBACK_MODEL=gemini-2.0-flash # Triggered automatically upon repeated 429 quota exhaustion
+GEMINI_RPM=4                               # Token-bucket rate limit ceiling (requests per minute)
+
+# Web Search Tool (Primary: Tavily)
+TAVILY_API_KEY=your_key_here
+
+# GitHub REST API (Optional: boosts rate limit from 60 to 5,000 req/hr)
+GITHUB_TOKEN=your_token_optional
+```
 
 ## 🧪 Live Experiments Log
 
