@@ -123,18 +123,59 @@ class SearchTool:
             used_provider = "duckduckgo"
             try:
                 def _run_ddg():
-                    with DDGS() as ddgs:
-                        return list(ddgs.text(query, max_results=max_results))
+                    raw_hits = []
+                    # Try DDGS API
+                    try:
+                        with DDGS() as ddgs:
+                            raw_hits = list(ddgs.text(query, max_results=max_results))
+                    except Exception:
+                        raw_hits = []
+
+                    # If DDGS returned empty (common in automated IP challenges), fall back to direct DDG HTML parsing
+                    if not raw_hits:
+                        import urllib.parse
+                        import urllib.request
+                        from bs4 import BeautifulSoup
+
+                        html_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
+                        req = urllib.request.Request(
+                            html_url,
+                            headers={
+                                "User-Agent": (
+                                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                                ),
+                                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                            },
+                        )
+                        with urllib.request.urlopen(req, timeout=8) as resp:
+                            soup = BeautifulSoup(resp.read().decode("utf-8", errors="ignore"), "html.parser")
+                            for res in soup.select(".result")[:max_results]:
+                                a = res.select_one(".result__title a")
+                                snip = res.select_one(".result__snippet")
+                                if a and a.get("href"):
+                                    href = a["href"]
+                                    # Extract target URL from DDG redirect url if present
+                                    if "uddg=" in href:
+                                        target_url = urllib.parse.unquote(href.split("uddg=")[1].split("&")[0])
+                                    else:
+                                        target_url = href
+                                    raw_hits.append({
+                                        "title": a.get_text(strip=True),
+                                        "href": target_url,
+                                        "body": snip.get_text(strip=True) if snip else "",
+                                    })
+                    return raw_hits
 
                 ddg_results = await asyncio.to_thread(_run_ddg)
                 for item in ddg_results:
                     url = item.get("href", "")
-                    if url and not is_blocked_domain(url):
+                    if url and url.startswith("http") and not is_blocked_domain(url):
                         hits.append(
                             SearchHit(
                                 title=item.get("title", ""),
                                 url=url,
-                                snippet=item.get("body", ""),
+                                snippet=item.get("body", "") or item.get("snippet", ""),
                                 source_tier=classify_source_tier(url),
                                 provider="duckduckgo",
                             )
@@ -147,6 +188,7 @@ class SearchTool:
                         error=f"Both Tavily and DuckDuckGo failed: {str(exc)}",
                         target=query,
                     )
+
 
         # 3. De-duplicate by canonical URL key while preserving official rank priority
         deduped_hits: List[SearchHit] = []
