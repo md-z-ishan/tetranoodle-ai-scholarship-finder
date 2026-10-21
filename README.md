@@ -45,23 +45,30 @@ The pipeline uses **7 specialized agent roles** coordinated via **LangGraph**:
 git clone https://github.com/md-z-ishan/tetranoodle-ai-scholarship-finder.git
 cd tetranoodle-ai-scholarship-finder
 
-# 2. Set up virtual environment
+# 2. Set up virtual environment (Python 3.11+)
 cd backend
-python3 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 
-# 3. Install dependencies
+# 3. Install pinned dependencies
+pip install --upgrade pip
 pip install -r requirements.txt
 
 # 4. Configure environment variables
 cp .env.example .env
-# Edit .env with your GEMINI_API_KEY, TAVILY_API_KEY, etc.
+# Edit .env with your GEMINI_API_KEY, TAVILY_API_KEY, and optional GITHUB_TOKEN
 
-# 5. Launch application
-uvicorn app.main:app --reload --port 8000
+# 5. Run test suite (Structural & Integrity validation)
+pytest tests/ -v
+
+# 6. Launch the FastAPI backend server
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Open your browser at `http://localhost:8000` to access the interactive dashboard.
+Verify service health at:
+- `http://localhost:8000/health` -> `{"status": "ok"}`
+- `http://localhost:8000/docs` -> Interactive OpenAPI documentation
+
 
 ---
 
