@@ -33,6 +33,7 @@ from app.schemas import Evidence, Opportunity, StudentProfile, VerifiedOpportuni
 from app.tools.domains import classify_source_tier, is_official_domain, registrable_domain
 from app.tools.fetch_tool import fetch_tool
 from app.tools.llm import llm_client
+from app.tools.search_tool import search_tool
 from app.tools.telemetry import EmitCallback, Telemetry
 
 
@@ -246,6 +247,25 @@ async def _verify_one(
         result.link_alive = False
         return result
 
+    # A4: Aggregator-to-official check: if source tier is not official, search for official portal
+    if classify_source_tier(url) != "official" and candidate.name:
+        search_query = f"{candidate.organization or ''} {candidate.name} official portal scholarship".strip()
+        try:
+            res_hits = await search_tool.search(search_query, max_results=3, telemetry=telemetry)
+            for rh in res_hits:
+                if is_official_domain(rh.url):
+                    logger.info("Aggregator %s redirected to official portal %s", url, rh.url)
+                    if telemetry:
+                        telemetry.increment("verifier_aggregator_resolved")
+                    result.evidence.append(Evidence(url=url, fetched_at=now_iso, snippet="Aggregator source page"))
+                    url = rh.url
+                    result.url = rh.url
+                    result.source_tier = "official"
+                    result.official_domain = True
+                    break
+        except Exception as exc:
+            logger.debug("Official portal resolution failed for %s: %s", candidate.name, exc)
+
     # ------------------------------------------------------------------ #
     # Step 1: Fetch official page (tiered)                                #
     # ------------------------------------------------------------------ #
@@ -299,6 +319,29 @@ async def _verify_one(
                 page_text += "\n\n" + extra_res.text
         except Exception as exc:
             logger.debug("Sub-link fetch failed %s: %s", extra_url, exc)
+
+    # ------------------------------------------------------------------ #
+    # Pre-LLM Deterministic Check (A2, A6: saves LLM quota)              #
+    # ------------------------------------------------------------------ #
+    page_lower = page_text.lower()
+    target_lvl = (profile.target_degree_level or profile.degree or "Master").lower()
+    is_grad = any(kw in target_lvl for kw in ["master", "msc", "phd", "doctoral", "postgraduate"])
+
+    # Incompatible programme purpose checks
+    if is_grad:
+        bad_purpose_kws = ["military service bond", "secondary school student", "junior college", "polytechnic diploma", "year 12 equivalent"]
+        for bp in bad_purpose_kws:
+            if bp in page_lower:
+                result.status = "rejected"
+                result.rejection_reason = f"Evidenced programme purpose is incompatible ({bp})"
+                result.confidence = 0.5
+                if emit:
+                    await emit(AgentEvent(
+                        run_id=run_id, agent="Verifier",
+                        message=f"Deterministic pre-LLM filter rejected {url[:50]}: {result.rejection_reason}",
+                        level="warn",
+                    ))
+                return result
 
     # ------------------------------------------------------------------ #
     # Step 3: Build compact context                                       #
@@ -502,6 +545,26 @@ async def _verify_one(
             except Exception as exc:
                 logger.warning("LLM eligibility comparison failed: %s", exc)
 
+    # Hard Filter A2: Citizenship / PR restrictions
+    all_eligibility_text = " ".join(grounded_eligibility + ([grounded_nationality] if grounded_nationality else [])).lower()
+    if profile.nationality:
+        nat_lower = profile.nationality.lower()
+        citizens_only_kws = ["singapore citizen", "us citizen", "canadian citizen", "citizens only", "domestic students only", "permanent residents only", "citizens or pr"]
+        if any(co in all_eligibility_text for co in citizens_only_kws):
+            if nat_lower not in all_eligibility_text:
+                eligibility_gaps.append(f"Ineligible: requires domestic citizenship or permanent residency (excluding nationality '{profile.nationality}')")
+    else:
+        # Nationality unknown: keep partial and add to needs_from_student
+        if any(co in all_eligibility_text for co in ["citizen", "permanent resident", "citizenship"]):
+            needs_from_student.append("Confirm citizenship/residency status (programme has domestic citizenship requirements)")
+
+    # Hard Filter A2: Target degree level check
+    if grounded_degree_levels and target_lvl:
+        grad_match = any(any(kw in dl.lower() for kw in ["master", "msc", "phd", "doctoral", "postgraduate", "graduate"]) for dl in grounded_degree_levels)
+        undergrad_only = all(any(kw in dl.lower() for kw in ["bachelor", "undergraduate", "diploma", "polytechnic", "year 12", "high school"]) for dl in grounded_degree_levels)
+        if is_grad and undergrad_only and not grad_match:
+            eligibility_gaps.append(f"Incompatible degree level: page exclusively supports undergraduate/diploma ({', '.join(grounded_degree_levels)}), but student target is '{profile.target_degree_level or 'Master'}'")
+
     result.eligibility_met = eligibility_met
     result.eligibility_gaps = eligibility_gaps
     result.needs_from_student = needs_from_student
@@ -532,7 +595,7 @@ async def _verify_one(
     if deadline_status == "passed":
         result.status = "rejected"
         result.rejection_reason = "Deadline has already passed"
-    elif eligibility_gaps and any("cgpa" in g.lower() or "degree" in g.lower() for g in eligibility_gaps):
+    elif eligibility_gaps:
         result.status = "rejected"
         result.rejection_reason = f"Clearly ineligible: {'; '.join(eligibility_gaps[:2])}"
     elif result.confidence >= 0.6 and evidenced_count >= 2 and not eligibility_gaps:
@@ -596,6 +659,29 @@ async def run_verifier(
 
     tasks = [_safe_verify(c) for c in candidates]
     results: List[VerifiedOpportunity] = await asyncio.gather(*tasks)
+
+    # A5: Slow retry pass for candidates that ended unverified due to transient or rate-limit errors
+    retry_targets = [
+        (c, idx) for idx, (c, r) in enumerate(zip(candidates, results))
+        if r.status == "unverified" and any(err in (r.rejection_reason or "").lower() for err in ["429", "quota", "rate", "resource_exhausted", "timeout"])
+    ]
+    if retry_targets:
+        if emit:
+            await emit(AgentEvent(
+                run_id=run_id, agent="Verifier",
+                message=f"Executing slow retry pass for {len(retry_targets[:2])} rate-limited candidates…",
+                level="warn",
+            ))
+        for cand, idx in retry_targets[:2]:
+            await asyncio.sleep(3.0)  # gentle pause for quota recovery
+            try:
+                retried = await _verify_one(cand, profile, run_id, emit, telemetry)
+                if retried.status != "unverified":
+                    results[idx] = retried
+                    if telemetry:
+                        telemetry.record_retry(component="verifier_slow_retry", attempt=2, reason="Recovered from rate limit")
+            except Exception as e:
+                logger.debug("Slow retry failed for %s: %s", cand.url, e)
 
     # Summary emit
     counts = {"verified": 0, "partial": 0, "unverified": 0, "rejected": 0}

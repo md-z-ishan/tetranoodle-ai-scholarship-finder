@@ -79,16 +79,20 @@ async def plan_queries(
     """Generate diverse, profile-grounded search queries with country coverage validation."""
     countries_str = ", ".join(profile.target_countries) if profile.target_countries else "None specified"
     skills_str = ", ".join(profile.skills[:6]) if profile.skills else "General"
+    target_level = profile.target_degree_level or "Master"
 
     plan_prompt = (
         f"Student Profile:\n"
-        f"- Target Degree: {profile.degree or 'Graduate Studies / Masters'}\n"
+        f"- Current Degree: {profile.degree or 'Undergraduate'}\n"
+        f"- TARGET DEGREE LEVEL (MANDATORY in all queries): {target_level}\n"
         f"- Field of Study: {profile.field or 'Computer Science / Engineering'}\n"
         f"- Target Countries: {countries_str}\n"
         f"- Academic Standing / CGPA: {profile.cgpa or 'Not specified'}\n"
         f"- Key Skills / Focus: {skills_str}\n"
         f"- Budget Constraints: {profile.budget_note or 'Seeking full/substantial funding'}\n\n"
-        f"Generate 8 to 14 diverse search queries following the coverage rules."
+        f"Generate 8 to 14 diverse search queries following the coverage rules. "
+        f"CRITICAL: Every query MUST explicitly target the student's next level '{target_level}' "
+        f"(e.g., do NOT search for secondary school or polytechnic diplomas when target is Master's)."
     )
 
     plan_res: QueryPlanList = await llm_client.generate_json(
@@ -98,25 +102,24 @@ async def plan_queries(
         telemetry=telemetry,
     )
 
-    # Post-validation: ensure minimum 2 queries per target country if specified
+    # Post-validation: ensure minimum 2 queries per target country with target_level
     if profile.target_countries:
         for country in profile.target_countries:
             field = profile.field or "Engineering"
-            degree = profile.degree or "Masters"
             country_queries = [q for q in plan_res.queries if country.lower() in q.query.lower()]
             while len(country_queries) < 2:
                 idx = len(country_queries) + 1
                 if idx == 1:
-                    query_text = f"official {country} government and university scholarships for international students {field} {degree}"
+                    query_text = f"official {country} government and university scholarships for international students {field} {target_level} full funding"
                 else:
-                    query_text = f"top accredited universities in {country} offering fully funded {degree} {field} scholarships"
+                    query_text = f"top accredited universities in {country} offering fully funded {target_level} {field} scholarships"
 
                 new_plan = SearchQueryPlan(
                     query=query_text,
                     target_country=country,
                     funding_focus="full",
                     official_body_focus=True,
-                    intent=f"Country coverage requirement for {country} (query #{idx})",
+                    intent=f"Country coverage requirement for {country} {target_level} (query #{idx})",
                 )
                 plan_res.queries.append(new_plan)
                 country_queries.append(new_plan)
@@ -160,9 +163,10 @@ async def resolve_aggregator_hit(
 
 async def triage_hits_to_candidates(
     hits: List[SearchHit],
+    target_degree_level: Optional[str] = None,
     telemetry: Optional[Telemetry] = None,
 ) -> List[Opportunity]:
-    """Triage raw search hits into Opportunity schemas using structured LLM extraction."""
+    """Triage raw search hits into Opportunity schemas using structured LLM extraction and level filtering."""
     if not hits:
         return []
 
@@ -176,9 +180,10 @@ async def triage_hits_to_candidates(
             f"Tier: {h.source_tier}\n\n"
         )
 
+    target_note = f" (TARGET DEGREE LEVEL: {target_degree_level})" if target_degree_level else ""
     triage_prompt = (
-        f"Review these live search hits and extract valid scholarship/university candidate opportunities.\n"
-        f"Do NOT invent details not mentioned in the snippets.\n\n"
+        f"Review these live search hits and extract valid scholarship/university candidate opportunities{target_note}.\n"
+        f"Do NOT invent details not mentioned in the snippets. Drop hits that do not match {target_degree_level or 'the student level'}.\n\n"
         f"{hits_text}"
     )
 
@@ -189,14 +194,25 @@ async def triage_hits_to_candidates(
         telemetry=telemetry,
     )
 
-    # Clean and match URLs
+    # Clean, match URLs, and apply deterministic degree-level filter (A1)
     valid_candidates: List[Opportunity] = []
     seen_urls: Set[str] = set()
+
+    # Generic conflicting level keywords
+    is_graduate_target = target_degree_level and any(
+        kw in target_degree_level.lower() for kw in ["master", "msc", "phd", "doctoral", "postgraduate"]
+    )
+    conflicting_kws = ["polytechnic", "diploma", "year 12", "secondary school", "high school", "k-12", "military service bond"]
 
     for cand in triage_result.candidates:
         if cand.url:
             clean_key = normalize_url_key(cand.url)
             if clean_key not in seen_urls:
+                text_block = f"{cand.name or ''} {cand.funding_summary or ''} {cand.source_snippet or ''}".lower()
+                # If target is graduate, drop obvious pre-degree/diploma items
+                if is_graduate_target and any(ck in text_block for ck in conflicting_kws):
+                    logger.info("Triage dropped non-graduate opportunity: %s", cand.name)
+                    continue
                 seen_urls.add(clean_key)
                 valid_candidates.append(cand)
 
@@ -265,7 +281,11 @@ async def run_scout(
     resolved_hits = await asyncio.gather(*resolution_tasks)
 
     # Step 4: Triage into Opportunities
-    candidates = await triage_hits_to_candidates(resolved_hits, telemetry=telemetry)
+    candidates = await triage_hits_to_candidates(
+        resolved_hits,
+        target_degree_level=profile.target_degree_level,
+        telemetry=telemetry,
+    )
 
     # Step 5: Second-Pass Recovery if fewer than target
     if len(candidates) < target_count:
@@ -283,13 +303,13 @@ async def run_scout(
                 reason=f"Found {len(candidates)} candidates, target is {target_count}",
             )
 
-        # Generate broadened fallback queries
-        degree = profile.degree or "Graduate"
+        # Generate broadened fallback queries using target_degree_level
+        target_lvl = profile.target_degree_level or "Master"
         field = profile.field or "STEM"
         broad_queries = [
-            f"fully funded {degree} scholarships in Europe for international students {field}",
-            f"international student tuition fee waiver {degree} {field} scholarships official",
-            f"commonwealth and bilateral government scholarships {degree} international students",
+            f"fully funded {target_lvl} scholarships in Europe for international students {field}",
+            f"international student tuition fee waiver {target_lvl} {field} scholarships official",
+            f"commonwealth and bilateral government scholarships {target_lvl} international students",
         ]
 
         broad_tasks = [search_tool.search(bq, max_results=4, telemetry=telemetry) for bq in broad_queries]
@@ -299,14 +319,22 @@ async def run_scout(
             if isinstance(r, list):
                 second_hits.extend(r)
 
-        second_candidates = await triage_hits_to_candidates(second_hits, telemetry=telemetry)
+        second_candidates = await triage_hits_to_candidates(
+            second_hits,
+            target_degree_level=profile.target_degree_level,
+            telemetry=telemetry,
+        )
         for sc in second_candidates:
             if normalize_url_key(sc.url) not in {normalize_url_key(c.url) for c in candidates}:
                 candidates.append(sc)
                 if len(candidates) >= max_candidates:
                     break
 
-    # Cap to max_candidates
+    # Prioritize candidates by source tier (A6: official first, then reputable, then unknown)
+    tier_priority = {"official": 0, "reputable": 1, "unknown": 2}
+    candidates.sort(key=lambda c: tier_priority.get(classify_source_tier(c.url or ""), 2))
+
+    # Cap to max_candidates (A6: default 12)
     candidates = candidates[:max_candidates]
 
     if emit:

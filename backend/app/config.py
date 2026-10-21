@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     # API Keys (Optional at startup; validated on first agent tool access)
     gemini_api_key: Optional[str] = Field(default=None, alias="GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
+    gemini_fallback_model: str = Field(default="gemini-2.0-flash", alias="GEMINI_FALLBACK_MODEL")
+    gemini_rpm: int = Field(default=4, alias="GEMINI_RPM")
     tavily_api_key: Optional[str] = Field(default=None, alias="TAVILY_API_KEY")
     github_token: Optional[str] = Field(default=None, alias="GITHUB_TOKEN")
 
