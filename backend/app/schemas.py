@@ -227,6 +227,7 @@ class RunResult(BaseModel):
     draft: Optional[ApplicationDraft] = None
     executive_summary: Optional[str] = None
     what_we_could_not_verify: List[str] = Field(default_factory=list)
+    needs_from_student: List[str] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     timings: Dict[str, float] = Field(default_factory=dict)
     run_health: Dict[str, Any] = Field(default_factory=dict)
