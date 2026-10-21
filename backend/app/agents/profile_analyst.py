@@ -15,9 +15,10 @@ Responsibilities:
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, List, Optional, Set, Tuple
+
 from app.events import AgentEvent
-from app.schemas import ExtraInputs, Project, StudentProfile
+from app.schemas import ExtraInputs, FieldConfidenceScore, Project, StudentProfile
 from app.tools.github_tool import github_tool
 from app.tools.llm import llm_client
 from app.tools.pdf_tool import pdf_tool
@@ -114,10 +115,12 @@ def perform_grounding_audit(
     return profile, removed_items
 
 
-def compute_missing_fields_and_confidence(profile: StudentProfile) -> Tuple[List[str], Dict[str, float]]:
+def compute_missing_fields_and_confidence(
+    profile: StudentProfile,
+) -> Tuple[List[str], List[FieldConfidenceScore]]:
     """Deterministically calculate missing critical profile attributes and confidence scores."""
     missing: List[str] = []
-    confidence: Dict[str, float] = {}
+    confidence_list: List[FieldConfidenceScore] = []
 
     # Critical fields for international scholarship matching
     checks = [
@@ -131,16 +134,24 @@ def compute_missing_fields_and_confidence(profile: StudentProfile) -> Tuple[List
 
     for field_name, value, weight in checks:
         if value:
-            confidence[field_name] = weight
+            confidence_list.append(FieldConfidenceScore(field_name=field_name, confidence=weight))
         else:
             missing.append(field_name)
-            confidence[field_name] = 0.0
+            confidence_list.append(
+                FieldConfidenceScore(
+                    field_name=field_name,
+                    confidence=0.0,
+                    reason="Not provided or found in documents",
+                )
+            )
 
     # Skills & Projects confidence based on quantity and verification
-    confidence["skills"] = min(1.0, round(len(profile.skills) * 0.2, 2))
-    confidence["projects"] = min(1.0, round(len(profile.projects) * 0.35, 2))
+    skills_conf = min(1.0, round(len(profile.skills) * 0.2, 2))
+    projects_conf = min(1.0, round(len(profile.projects) * 0.35, 2))
+    confidence_list.append(FieldConfidenceScore(field_name="skills", confidence=skills_conf))
+    confidence_list.append(FieldConfidenceScore(field_name="projects", confidence=projects_conf))
 
-    return missing, confidence
+    return missing, confidence_list
 
 
 async def run_profile_analyst(
@@ -249,15 +260,16 @@ async def run_profile_analyst(
     if extra_inputs:
         if extra_inputs.target_countries:
             profile.target_countries = extra_inputs.target_countries
-            profile.source_notes.append("Target countries provided via verified form input.")
+            profile.source_notes.append("Target countries provided via verified form input (overrides document extraction).")
         if extra_inputs.budget_note:
             profile.budget_note = extra_inputs.budget_note
-            profile.source_notes.append("Budget constraints provided via verified form input.")
+            profile.source_notes.append("Budget constraints provided via verified form input (overrides document extraction).")
         if extra_inputs.degree_level and not profile.degree:
             profile.degree = extra_inputs.degree_level
             profile.source_notes.append("Intended degree level specified via form input.")
         if extra_inputs.intended_field and not profile.field:
             profile.field = extra_inputs.intended_field
+            profile.source_notes.append("Intended field specified via form input.")
         if extra_inputs.github_url:
             profile.github_url = extra_inputs.github_url
         if extra_inputs.linkedin_url:

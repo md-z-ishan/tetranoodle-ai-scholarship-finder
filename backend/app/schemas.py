@@ -62,6 +62,13 @@ class GithubProfile(BaseModel):
 # (b) Student Profile Model (Enriched, Traceable, Honest about Gaps)
 # -----------------------------------------------------------------------------
 
+class FieldConfidenceScore(BaseModel):
+    """Grounded evidence confidence score for a student profile attribute."""
+    field_name: str
+    confidence: float
+    reason: Optional[str] = None
+
+
 class StudentProfile(BaseModel):
     """Normalized profile extracted from resume, transcript, and GitHub."""
     name: Optional[str] = None
@@ -80,7 +87,8 @@ class StudentProfile(BaseModel):
     linkedin_url: Optional[str] = None
     source_notes: List[str] = Field(default_factory=list)
     missing_info: List[str] = Field(default_factory=list)
-    field_confidence: Dict[str, float] = Field(default_factory=dict)
+    field_confidence: List[FieldConfidenceScore] = Field(default_factory=list)
+
 
 
 class ExtraInputs(BaseModel):

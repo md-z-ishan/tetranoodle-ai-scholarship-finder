@@ -127,16 +127,32 @@ class GeminiClient:
     ) -> T:
         """Generate structured JSON adhering to a Pydantic schema with defensive repair."""
         client = self._get_client()
-        model = self._model_name
+        # Clean JSON schema for Google GenAI Developer API (removes additionalProperties which triggers API error)
+        def _clean_schema_dict(d: Any) -> Any:
+            if isinstance(d, dict):
+                clean = {}
+                for k, v in d.items():
+                    if k in ("additionalProperties", "$defs", "definitions"):
+                        continue
+                    clean[k] = _clean_schema_dict(v)
+                return clean
+            elif isinstance(d, list):
+                return [_clean_schema_dict(x) for x in d]
+            return d
+
+        cleaned_schema = _clean_schema_dict(schema.model_json_schema())
 
         config = types.GenerateContentConfig(
             response_mime_type="application/json",
-            response_schema=schema,
+            response_schema=cleaned_schema,
         )
         if system_instruction:
             config.system_instruction = system_instruction
 
+        model = self._model_name
+
         async with _llm_semaphore:
+
             for attempt in range(1, max_retries + 1):
                 try:
                     if telemetry:
