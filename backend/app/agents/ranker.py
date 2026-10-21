@@ -53,8 +53,8 @@ FUNDING_SCORES: Dict[str, float] = {
 
 TIER_RISK_BONUS: Dict[str, float] = {
     "official": 1.0,
-    "reputable": 0.7,
-    "unknown": 0.4,
+    "reputable": 0.75,
+    "unknown": 0.5,
 }
 
 
@@ -260,9 +260,16 @@ async def run_ranker(
         ))
 
     # ------------------------------------------------------------------
-    # Step 1: Exclude rejected; score the rest
+    # Step 1: Strict Viability Filter (A3):
+    # Only 'verified' or 'partial' candidates with deadline_status != 'passed'
+    # and no blocking eligibility gaps may enter top 5.
     # ------------------------------------------------------------------
-    scoreable = [v for v in verified if v.status != "rejected"]
+    scoreable = [
+        v for v in verified
+        if v.status in ("verified", "partial")
+        and v.deadline_status != "passed"
+        and not v.eligibility_gaps
+    ]
     scored: List[Tuple[float, ScoreBreakdown, VerifiedOpportunity]] = []
 
     for opp in scoreable:
@@ -274,8 +281,8 @@ async def run_ranker(
     if emit:
         await emit(AgentEvent(
             run_id=run_id, agent="Ranker",
-            message=f"Scoring complete. Top score: {scored[0][0]:.1f}/100 for '{scored[0][2].name}'" if scored else "No scoreable candidates",
-            level="info",
+            message=f"Viability filter: {len(scoreable)}/{len(verified)} candidates are viable. Top score: {scored[0][0]:.1f}/100 for '{scored[0][2].name}'" if scored else f"Viability filter: 0/{len(verified)} viable candidates",
+            level="info" if scoreable else "warn",
         ))
 
     # ------------------------------------------------------------------
@@ -296,7 +303,7 @@ async def run_ranker(
         top5.append((score, breakdown, opp))
         country_counts[country] = country_counts.get(country, 0) + 1
 
-    # If we still have < 5 (due to diversity), fill from remaining
+    # If we still have < 5 (due to diversity), fill from remaining scoreable ONLY (never unverified/rejected)
     if len(top5) < 5:
         remaining = [x for x in scored if x not in top5]
         for item in remaining:
@@ -307,9 +314,9 @@ async def run_ranker(
     if emit:
         await emit(AgentEvent(
             run_id=run_id, agent="Ranker",
-            message=f"Selected {len(top5)} top candidates (target=5, available={len(scoreable)})",
+            message=f"Selected {len(top5)} viable recommendations (target=5, viable={len(scoreable)})",
             level="info" if len(top5) == 5 else "warn",
-            payload={"selected": len(top5), "available": len(scoreable)},
+            payload={"selected": len(top5), "viable": len(scoreable)},
         ))
 
     # ------------------------------------------------------------------
@@ -432,10 +439,11 @@ async def run_ranker(
     # ------------------------------------------------------------------
     # Could not verify / needs from student lists
     # ------------------------------------------------------------------
+    top5_opps = {id(opp) for _, _, opp in top5}
     could_not_verify = [
-        f"{v.name or v.url}: {v.status} — {v.rejection_reason or ', '.join(v.unknown_fields[:2]) or 'low evidence'}"
+        f"{v.name or v.url}: {v.status} — {v.rejection_reason or (', '.join(v.eligibility_gaps) if v.eligibility_gaps else None) or ', '.join(v.unknown_fields[:2]) or 'low evidence'}"
         for v in verified
-        if v.status in ("unverified", "rejected")
+        if id(v) not in top5_opps
     ]
 
     needs_from_student = []

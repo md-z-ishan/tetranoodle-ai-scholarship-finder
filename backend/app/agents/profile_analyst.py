@@ -256,7 +256,7 @@ async def run_profile_analyst(
         telemetry=telemetry,
     )
 
-    # Step 4: Merge Form Overrides (ExtraInputs)
+    # Step 4: Merge Form Overrides (ExtraInputs) & Derive Target Degree Level
     if extra_inputs:
         if extra_inputs.target_countries:
             profile.target_countries = extra_inputs.target_countries
@@ -264,9 +264,17 @@ async def run_profile_analyst(
         if extra_inputs.budget_note:
             profile.budget_note = extra_inputs.budget_note
             profile.source_notes.append("Budget constraints provided via verified form input (overrides document extraction).")
-        if extra_inputs.degree_level and not profile.degree:
-            profile.degree = extra_inputs.degree_level
-            profile.source_notes.append("Intended degree level specified via form input.")
+        if extra_inputs.target_degree_level:
+            profile.target_degree_level = extra_inputs.target_degree_level
+            profile.source_notes.append(f"Target degree level explicitly specified as {profile.target_degree_level}.")
+        elif extra_inputs.degree_level:
+            profile.target_degree_level = extra_inputs.degree_level
+            if not profile.degree:
+                profile.degree = extra_inputs.degree_level
+            profile.source_notes.append(f"Target degree level set via form input: {profile.target_degree_level}.")
+        if extra_inputs.nationality:
+            profile.nationality = extra_inputs.nationality
+            profile.source_notes.append(f"Nationality verified via form input: {profile.nationality}.")
         if extra_inputs.intended_field and not profile.field:
             profile.field = extra_inputs.intended_field
             profile.source_notes.append("Intended field specified via form input.")
@@ -274,6 +282,18 @@ async def run_profile_analyst(
             profile.github_url = extra_inputs.github_url
         if extra_inputs.linkedin_url:
             profile.linkedin_url = extra_inputs.linkedin_url
+
+    # Deterministic Next-Level Derivation (A1) if target_degree_level is still unset
+    if not profile.target_degree_level:
+        current_deg = (profile.degree or "").lower()
+        if any(kw in current_deg for kw in ["bachelor", "b.tech", "btech", "b.e", "b.s", "undergraduate"]):
+            profile.target_degree_level = "Master"
+            profile.source_notes.append("Derived target degree level 'Master' as next academic progression.")
+        elif any(kw in current_deg for kw in ["master", "m.tech", "mtech", "msc", "m.s", "postgraduate"]):
+            profile.target_degree_level = "Doctoral / PhD"
+            profile.source_notes.append("Derived target degree level 'Doctoral / PhD' as next academic progression.")
+        else:
+            profile.target_degree_level = "Master"
 
     # Step 5: Grounding Check (Anti-Hallucination Gate)
     profile, pruned_items = perform_grounding_audit(profile, combined_corpus)

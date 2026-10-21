@@ -73,7 +73,9 @@ class StudentProfile(BaseModel):
     """Normalized profile extracted from resume, transcript, and GitHub."""
     name: Optional[str] = None
     degree: Optional[str] = None
+    target_degree_level: Optional[str] = None
     field: Optional[str] = None
+    nationality: Optional[str] = None
     cgpa: Optional[float] = None
     cgpa_scale: Optional[float] = None
     graduation_year: Optional[int] = None
@@ -98,6 +100,8 @@ class ExtraInputs(BaseModel):
     target_countries: List[str] = Field(default_factory=list)
     budget_note: Optional[str] = None
     degree_level: Optional[str] = None
+    target_degree_level: Optional[str] = None
+    nationality: Optional[str] = None
     intended_field: Optional[str] = None
     other_links: List[str] = Field(default_factory=list)
 
