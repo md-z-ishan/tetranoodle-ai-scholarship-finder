@@ -13,8 +13,9 @@ import asyncio
 from datetime import datetime, timezone
 import logging
 import re
-from typing import List, Optional
+from typing import List, Literal, Optional
 import httpx
+
 from bs4 import BeautifulSoup
 from pydantic import BaseModel
 from app.config import settings
@@ -40,8 +41,11 @@ MAX_BODY_BYTES = 5 * 1024 * 1024
 MAX_PAGE_TEXT_CHARS = 12000
 
 
+FetchedVia = Literal["direct", "headers_retry", "tavily_extract", "failed"]
+
+
 class FetchedPage(BaseModel):
-    """Normalized page fetch result with metadata and extracted text."""
+    """Normalized page fetch result with metadata, extraction tiers, and extracted text."""
     url: str
     final_url: Optional[str] = None
     status_code: Optional[int] = None
@@ -50,7 +54,9 @@ class FetchedPage(BaseModel):
     title: Optional[str] = None
     text: Optional[str] = None
     content_type: Optional[str] = None
+    fetched_via: FetchedVia = "direct"
     error: Optional[str] = None
+
 
 
 def clean_html_text(html_content: str, max_chars: int = MAX_PAGE_TEXT_CHARS) -> tuple[str, str]:
@@ -164,9 +170,29 @@ class FetchTool:
                             await asyncio.sleep(backoff)
                             continue
 
-                        # Check non-2xx status (Special WAF 403 / anti-bot handling)
+                        # Check non-2xx status (Special WAF 403 / anti-bot handling with tiered escalation)
                         if response.status_code >= 400:
-                            # If blocked with 403/401/503 on an official site, attempt Tavily Extract fallback
+                            # Tier 2 Escalation: If blocked with 403/401, retry once with browser-emulation headers
+                            if response.status_code in (403, 401) and attempt == 1:
+                                if telemetry:
+                                    telemetry.record_retry(
+                                        component="fetch_tool",
+                                        attempt=1,
+                                        reason=f"HTTP {response.status_code} WAF - escalating to alternate browser headers",
+                                        target=url,
+                                    )
+                                # Next loop iteration will execute headers retry
+                                headers["Sec-Ch-Ua"] = '"Chromium";v="124", "Google Chrome";v="124"'
+                                headers["Sec-Ch-Ua-Mobile"] = "?0"
+                                headers["Sec-Ch-Ua-Platform"] = '"macOS"'
+                                headers["Sec-Fetch-Dest"] = "document"
+                                headers["Sec-Fetch-Mode"] = "navigate"
+                                headers["Sec-Fetch-Site"] = "none"
+                                headers["Sec-Fetch-User"] = "?1"
+                                headers["Upgrade-Insecure-Requests"] = "1"
+                                continue
+
+                            # Tier 3 Escalation: If still blocked on an official site, attempt Tavily Extract fallback
                             if response.status_code in (403, 401, 503) and settings.tavily_api_key:
                                 try:
                                     from tavily import TavilyClient
@@ -195,16 +221,19 @@ class FetchTool:
                                             title="Official Portal (Extracted)",
                                             text=clean_c,
                                             content_type="text/html",
+                                            fetched_via="tavily_extract",
                                         )
                                 except Exception as ext_err:
                                     logger.warning("Tavily extract fallback failed for %s: %s", url, ext_err)
 
+                            # All tiers failed - remain truthful
                             return FetchedPage(
                                 url=url,
                                 final_url=str(response.url),
                                 status_code=response.status_code,
                                 link_alive=False,
                                 fetched_at=timestamp,
+                                fetched_via="failed",
                                 error=f"HTTP status {response.status_code}",
                             )
 
@@ -218,6 +247,7 @@ class FetchTool:
                                 status_code=response.status_code,
                                 link_alive=True,
                                 fetched_at=timestamp,
+                                fetched_via="direct" if attempt == 1 else "headers_retry",
                                 error="Response body exceeded 5MB size limit",
                             )
 
@@ -234,7 +264,9 @@ class FetchTool:
                             title=title,
                             text=text,
                             content_type=content_type,
+                            fetched_via="direct" if attempt == 1 else "headers_retry",
                         )
+
 
                 except (httpx.TimeoutException, httpx.ConnectError) as exc:
                     if attempt < max_retries:
