@@ -68,3 +68,26 @@ class Opportunity(BaseModel):
     source_snippet: Optional[str] = None
 
 
+# -----------------------------------------------------------------------------
+# (d) Verified Opportunity Model (Audited by Verifier)
+# -----------------------------------------------------------------------------
+
+SourceTier = Literal["official", "reputable", "unknown"]
+VerificationStatus = Literal["verified", "partial", "unverified", "rejected"]
+
+
+class VerifiedOpportunity(Opportunity):
+    """Deeply verified opportunity with official page evidence, audits, and confidence."""
+    eligibility_met: List[str] = Field(default_factory=list)
+    eligibility_gaps: List[str] = Field(default_factory=list)
+    unknown_fields: List[str] = Field(default_factory=list)
+    evidence: List[Evidence] = Field(default_factory=list)
+    source_tier: SourceTier = "unknown"
+    official_domain: Optional[bool] = None
+    link_alive: Optional[bool] = None
+    confidence: float = 0.0
+    status: VerificationStatus = "unverified"
+    rejection_reason: Optional[str] = None
+
+
+
