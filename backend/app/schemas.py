@@ -90,4 +90,48 @@ class VerifiedOpportunity(Opportunity):
     rejection_reason: Optional[str] = None
 
 
+# -----------------------------------------------------------------------------
+# (e) Final Swarm Output Models (Ranker, Writer, Critic & Run Lifecycle)
+# -----------------------------------------------------------------------------
+
+FundingType = Literal["full_ride", "tuition_waiver", "stipend_only", "partial", "loan_assistance", "unknown"]
+UrgencyLevel = Literal["urgent", "upcoming", "relaxed", "expired", "unknown"]
+
+
+class Recommendation(BaseModel):
+    """Ranked top recommendation with transparent justification and student action items."""
+    rank: int
+    opportunity: VerifiedOpportunity
+    why_it_fits: str
+    funding_type: FundingType = "unknown"
+    urgency: UrgencyLevel = "unknown"
+    how_to_apply: List[str] = Field(default_factory=list)
+    still_needed: List[str] = Field(default_factory=list)
+
+
+class ApplicationDraft(BaseModel):
+    """Personalized statement of purpose / application draft backed strictly by profile facts."""
+    opportunity_name: Optional[str] = None
+    text: Optional[str] = None
+    based_on_profile_fields: List[str] = Field(default_factory=list)
+    critic_notes: List[str] = Field(default_factory=list)
+    revision_count: int = 0
+    label: str = "Draft only - not submitted"
+
+
+class RunResult(BaseModel):
+    """Consolidated end-to-end swarm execution payload returned to client & saved in history."""
+    run_id: str
+    profile: Optional[StudentProfile] = None
+    candidates: List[Opportunity] = Field(default_factory=list)
+    verified: List[VerifiedOpportunity] = Field(default_factory=list)
+    recommendations: List[Recommendation] = Field(default_factory=list)
+    draft: Optional[ApplicationDraft] = None
+    executive_summary: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)
+    timings: Dict[str, float] = Field(default_factory=dict)
+    run_health: Dict[str, Any] = Field(default_factory=dict)
+
+
+
 
