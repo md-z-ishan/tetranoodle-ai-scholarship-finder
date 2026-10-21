@@ -52,3 +52,19 @@ class StudentProfile(BaseModel):
     source_notes: List[str] = Field(default_factory=list)
     missing_info: List[str] = Field(default_factory=list)
 
+
+# -----------------------------------------------------------------------------
+# (c) Candidate Opportunity Model (Discovered by Scout)
+# -----------------------------------------------------------------------------
+
+class Opportunity(BaseModel):
+    """Raw scholarship or degree opportunity identified from live web search."""
+    name: Optional[str] = None
+    organization: Optional[str] = None
+    country: Optional[str] = None
+    url: Optional[str] = None
+    funding_summary: Optional[str] = None
+    deadline: Optional[str] = None
+    source_snippet: Optional[str] = None
+
+
