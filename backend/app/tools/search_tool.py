@@ -100,13 +100,20 @@ class SearchTool:
                             )
                         )
             except Exception as exc:
-                logger.warning("Tavily search failed for '%s': %s. Falling back to DuckDuckGo...", query, exc)
+                err_msg = str(exc)
+                reason = f"Tavily error: {err_msg[:120]}"
+                if "401" in err_msg or "unauthorized" in err_msg.lower():
+                    reason = "Tavily 401 Unauthorized: Invalid or inactive API key"
+                elif "429" in err_msg or "quota" in err_msg.lower():
+                    reason = "Tavily quota exceeded / rate limit (429)"
+
+                logger.warning("Tavily search failed for '%s': %s. Falling back to DuckDuckGo...", query, reason)
                 if telemetry:
                     telemetry.record_fallback(
                         component="search_tool",
                         from_provider="tavily",
                         to_provider="duckduckgo",
-                        reason=f"Tavily error: {str(exc)[:150]}",
+                        reason=reason,
                     )
                 hits = []
         else:
@@ -115,12 +122,21 @@ class SearchTool:
                     component="search_tool",
                     from_provider="tavily",
                     to_provider="duckduckgo",
-                    reason="TAVILY_API_KEY not configured",
+                    reason="TAVILY_API_KEY missing from environment",
                 )
 
         # 2. Fallback: DuckDuckGo Search (if Tavily produced no hits or errored)
         if not hits:
+            # If Tavily ran successfully but returned 0 hits
+            if tavily_client and telemetry and not any(f["to_provider"] == "duckduckgo" for f in telemetry.fallbacks):
+                telemetry.record_fallback(
+                    component="search_tool",
+                    from_provider="tavily",
+                    to_provider="duckduckgo",
+                    reason="Tavily returned 0 hits for query",
+                )
             used_provider = "duckduckgo"
+
             try:
                 def _run_ddg():
                     raw_hits = []
