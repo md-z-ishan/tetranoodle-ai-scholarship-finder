@@ -127,16 +127,34 @@ class GeminiClient:
     ) -> T:
         """Generate structured JSON adhering to a Pydantic schema with defensive repair."""
         client = self._get_client()
-        model = self._model_name
+        # Inline all $ref definitions so Gemini SDK t_schema never sees dangling refs.
+        def _inline_refs(d: Any, defs: Dict[str, Any]) -> Any:
+            if isinstance(d, dict):
+                if "$ref" in d:
+                    ref_name = d["$ref"].split("/")[-1]
+                    resolved = _inline_refs(defs.get(ref_name, {}), defs)
+                    return resolved
+                return {k: _inline_refs(v, defs) for k, v in d.items()
+                        if k not in ("additionalProperties", "$defs", "definitions", "$schema", "title")}
+            elif isinstance(d, list):
+                return [_inline_refs(x, defs) for x in d]
+            return d
+
+        raw_schema = schema.model_json_schema()
+        defs = raw_schema.get("$defs", raw_schema.get("definitions", {}))
+        cleaned_schema = _inline_refs(raw_schema, defs)
 
         config = types.GenerateContentConfig(
             response_mime_type="application/json",
-            response_schema=schema,
+            response_schema=cleaned_schema,
         )
         if system_instruction:
             config.system_instruction = system_instruction
 
+        model = self._model_name
+
         async with _llm_semaphore:
+
             for attempt in range(1, max_retries + 1):
                 try:
                     if telemetry:

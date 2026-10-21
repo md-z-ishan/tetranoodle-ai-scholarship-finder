@@ -62,12 +62,20 @@ class GithubProfile(BaseModel):
 # (b) Student Profile Model (Enriched, Traceable, Honest about Gaps)
 # -----------------------------------------------------------------------------
 
+class FieldConfidenceScore(BaseModel):
+    """Grounded evidence confidence score for a student profile attribute."""
+    field_name: str
+    confidence: float
+    reason: Optional[str] = None
+
+
 class StudentProfile(BaseModel):
     """Normalized profile extracted from resume, transcript, and GitHub."""
     name: Optional[str] = None
     degree: Optional[str] = None
     field: Optional[str] = None
     cgpa: Optional[float] = None
+    cgpa_scale: Optional[float] = None
     graduation_year: Optional[int] = None
     skills: List[str] = Field(default_factory=list)
     projects: List[Project] = Field(default_factory=list)
@@ -79,6 +87,20 @@ class StudentProfile(BaseModel):
     linkedin_url: Optional[str] = None
     source_notes: List[str] = Field(default_factory=list)
     missing_info: List[str] = Field(default_factory=list)
+    field_confidence: List[FieldConfidenceScore] = Field(default_factory=list)
+
+
+
+class ExtraInputs(BaseModel):
+    """User-provided form fields overriding or augmenting parsed documents."""
+    github_url: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    target_countries: List[str] = Field(default_factory=list)
+    budget_note: Optional[str] = None
+    degree_level: Optional[str] = None
+    intended_field: Optional[str] = None
+    other_links: List[str] = Field(default_factory=list)
+
 
 
 # -----------------------------------------------------------------------------
@@ -97,22 +119,53 @@ class Opportunity(BaseModel):
 
 
 # -----------------------------------------------------------------------------
-# (d) Verified Opportunity Model (Audited by Verifier)
+# (d) Verified Opportunity Model (Audited by Verifier) — Phase 4
 # -----------------------------------------------------------------------------
 
 SourceTier = Literal["official", "reputable", "unknown"]
 VerificationStatus = Literal["verified", "partial", "unverified", "rejected"]
+DeadlineStatus = Literal["open", "closing_soon", "passed", "unclear", "rolling"]
+FundingTypeVerified = Literal["full", "partial", "tuition_waiver", "stipend_only", "unknown"]
 
 
 class VerifiedOpportunity(Opportunity):
-    """Deeply verified opportunity with official page evidence, audits, and confidence."""
+    """Deeply verified opportunity with official page evidence, audits, and confidence.
+
+    Confidence formula (documented here for reproducibility):
+      raw = (fields_evidenced / 4) * source_tier_factor * (1.0 if link_alive else 0.3)
+      source_tier_factor: official=1.0, reputable=0.75, unknown=0.5
+      Confidence clamped to [0.0, 1.0].
+    """
+    # Verification results
     eligibility_met: List[str] = Field(default_factory=list)
     eligibility_gaps: List[str] = Field(default_factory=list)
     unknown_fields: List[str] = Field(default_factory=list)
+    needs_from_student: List[str] = Field(default_factory=list)
     evidence: List[Evidence] = Field(default_factory=list)
+
+    # Source quality
     source_tier: SourceTier = "unknown"
     official_domain: Optional[bool] = None
     link_alive: Optional[bool] = None
+    fetched_via: Optional[str] = None        # "httpx" | "tavily_extract" | "bs4" | None
+    fetched_at: Optional[str] = None
+
+    # Deadline analysis
+    deadline_date: Optional[str] = None      # ISO date string or null
+    deadline_text: Optional[str] = None      # Raw text from page
+    days_left: Optional[int] = None
+    deadline_status: DeadlineStatus = "unclear"
+
+    # Funding details
+    funding_type: FundingTypeVerified = "unknown"
+    degree_levels: List[str] = Field(default_factory=list)
+    nationality_notes: Optional[str] = None
+    apply_steps: List[str] = Field(default_factory=list)
+
+    # Per-field evidence dict: field_name -> Evidence
+    field_evidence: Dict[str, Any] = Field(default_factory=dict)
+
+    # Computed confidence and status
     confidence: float = 0.0
     status: VerificationStatus = "unverified"
     rejection_reason: Optional[str] = None
@@ -126,13 +179,26 @@ FundingType = Literal["full_ride", "tuition_waiver", "stipend_only", "partial", 
 UrgencyLevel = Literal["urgent", "upcoming", "relaxed", "expired", "unknown"]
 
 
+class ScoreBreakdown(BaseModel):
+    """Transparent per-component score with short rationale."""
+    fit: float = 0.0
+    fit_reason: str = ""
+    funding: float = 0.0
+    funding_reason: str = ""
+    urgency: float = 0.0
+    urgency_reason: str = ""
+    risk: float = 0.0
+    risk_reason: str = ""
+
+
 class Recommendation(BaseModel):
     """Ranked top recommendation with transparent justification and student action items."""
     rank: int
     opportunity: VerifiedOpportunity
-    why_it_fits: str
-    funding_type: FundingType = "unknown"
-    urgency: UrgencyLevel = "unknown"
+    score: float = 0.0                        # 0–100 composite score
+    score_breakdown: Optional[ScoreBreakdown] = None
+    why_it_fits: str = ""
+    urgency_tag: UrgencyLevel = "unknown"
     how_to_apply: List[str] = Field(default_factory=list)
     still_needed: List[str] = Field(default_factory=list)
 
@@ -156,10 +222,7 @@ class RunResult(BaseModel):
     recommendations: List[Recommendation] = Field(default_factory=list)
     draft: Optional[ApplicationDraft] = None
     executive_summary: Optional[str] = None
+    what_we_could_not_verify: List[str] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     timings: Dict[str, float] = Field(default_factory=dict)
     run_health: Dict[str, Any] = Field(default_factory=dict)
-
-
-
-
