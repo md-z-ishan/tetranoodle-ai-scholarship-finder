@@ -68,6 +68,7 @@ class StudentProfile(BaseModel):
     degree: Optional[str] = None
     field: Optional[str] = None
     cgpa: Optional[float] = None
+    cgpa_scale: Optional[float] = None
     graduation_year: Optional[int] = None
     skills: List[str] = Field(default_factory=list)
     projects: List[Project] = Field(default_factory=list)
@@ -79,6 +80,19 @@ class StudentProfile(BaseModel):
     linkedin_url: Optional[str] = None
     source_notes: List[str] = Field(default_factory=list)
     missing_info: List[str] = Field(default_factory=list)
+    field_confidence: Dict[str, float] = Field(default_factory=dict)
+
+
+class ExtraInputs(BaseModel):
+    """User-provided form fields overriding or augmenting parsed documents."""
+    github_url: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    target_countries: List[str] = Field(default_factory=list)
+    budget_note: Optional[str] = None
+    degree_level: Optional[str] = None
+    intended_field: Optional[str] = None
+    other_links: List[str] = Field(default_factory=list)
+
 
 
 # -----------------------------------------------------------------------------
