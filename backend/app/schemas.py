@@ -28,3 +28,27 @@ class Project(BaseModel):
     name: str
     description: Optional[str] = None
     tech: List[str] = Field(default_factory=list)
+
+
+# -----------------------------------------------------------------------------
+# (b) Student Profile Model (Enriched, Traceable, Honest about Gaps)
+# -----------------------------------------------------------------------------
+
+class StudentProfile(BaseModel):
+    """Normalized profile extracted from resume, transcript, and GitHub."""
+    name: Optional[str] = None
+    degree: Optional[str] = None
+    field: Optional[str] = None
+    cgpa: Optional[float] = None
+    graduation_year: Optional[int] = None
+    skills: List[str] = Field(default_factory=list)
+    projects: List[Project] = Field(default_factory=list)
+    achievements: List[str] = Field(default_factory=list)
+    target_countries: List[str] = Field(default_factory=list)
+    budget_note: Optional[str] = None
+    language_tests: List[str] = Field(default_factory=list)
+    github_url: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    source_notes: List[str] = Field(default_factory=list)
+    missing_info: List[str] = Field(default_factory=list)
+
