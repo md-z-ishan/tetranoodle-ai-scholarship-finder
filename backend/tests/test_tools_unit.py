@@ -134,3 +134,71 @@ def test_pdf_extraction_from_bytes():
     assert res.likely_scanned is False
     assert "Bachelor of Technology" in res.text
     assert "8.4" in res.text
+
+
+@pytest.mark.asyncio
+async def test_tiered_fetch_escalation(monkeypatch):
+    """Verify tiered fetch escalation: 403 triggers header retry, then Tavily Extract, or logs failure."""
+    from app.tools.fetch_tool import FetchTool
+    import httpx
+
+    tool = FetchTool(timeout_seconds=2)
+    telemetry = Telemetry(run_id="test-fetch-escalate")
+
+    # Case A: 403 on first try, then 403 on headers retry, then Tavily extract succeeds
+    call_count = 0
+
+    class MockResponse:
+        def __init__(self, status_code: int):
+            self.status_code = status_code
+            self.headers = {"content-type": "text/html"}
+            self.content = b"<html><body>Blocked</body></html>"
+            self.text = "<html><body>Blocked</body></html>"
+            self.url = httpx.URL("https://example-blocked-univ.edu/scholarships")
+
+    async def mock_get(self, url):
+        nonlocal call_count
+        call_count += 1
+        return MockResponse(403)
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+
+    class MockTavilyClient:
+        def __init__(self, api_key: str):
+            pass
+
+        def extract(self, urls):
+            return {
+                "results": [
+                    {
+                        "url": urls[0],
+                        "raw_content": "<h1>Graduate Scholarships</h1><p>Eligibility: CGPA 8.0 or above</p>",
+                    }
+                ]
+            }
+
+    # Patch TavilyClient inside tavily module
+    import tavily
+    monkeypatch.setattr(tavily, "TavilyClient", MockTavilyClient)
+    # Ensure tavily key is seen as present
+    monkeypatch.setattr("app.config.settings.tavily_api_key", "tvly-mock-for-unit-test")
+
+    page = await tool.fetch_page("https://example-blocked-univ.edu/scholarships", telemetry=telemetry)
+    assert page.link_alive is True
+    assert page.fetched_via == "tavily_extract"
+    assert "Eligibility" in page.text
+    assert telemetry.summary()["fallbacks_count"] >= 1
+
+    # Case B: All tiers fail when Tavily extract fails/unavailable
+    telemetry_fail = Telemetry(run_id="test-fetch-fail")
+
+    def mock_extract_fail(self, urls):
+        raise RuntimeError("Tavily Extract API error")
+
+    monkeypatch.setattr(MockTavilyClient, "extract", mock_extract_fail)
+
+    fail_page = await tool.fetch_page("https://example-blocked-univ.edu/scholarships", telemetry=telemetry_fail)
+    assert fail_page.link_alive is False
+    assert fail_page.fetched_via == "failed"
+    assert "HTTP status 403" in fail_page.error
+
