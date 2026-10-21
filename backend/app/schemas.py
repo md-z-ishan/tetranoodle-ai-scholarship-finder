@@ -31,6 +31,34 @@ class Project(BaseModel):
 
 
 # -----------------------------------------------------------------------------
+# GitHub Enrichment Models
+# -----------------------------------------------------------------------------
+
+class GithubRepo(BaseModel):
+    """Public repository details fetched from GitHub REST API."""
+    name: str
+    description: Optional[str] = None
+    language: Optional[str] = None
+    topics: List[str] = Field(default_factory=list)
+    stars: int = 0
+    last_pushed: Optional[str] = None
+    readme_excerpt: Optional[str] = None
+
+
+class GithubProfile(BaseModel):
+    """Aggregated public GitHub developer profile and activity."""
+    username: str
+    name: Optional[str] = None
+    bio: Optional[str] = None
+    public_repos: int = 0
+    followers: int = 0
+    top_languages: List[str] = Field(default_factory=list)
+    repos: List[GithubRepo] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
+
+# -----------------------------------------------------------------------------
 # (b) Student Profile Model (Enriched, Traceable, Honest about Gaps)
 # -----------------------------------------------------------------------------
 
