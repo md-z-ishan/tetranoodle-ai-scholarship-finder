@@ -36,6 +36,11 @@ async def health_check():
     return {"status": "ok"}
 
 
+# Include swarm run API endpoints
+from app.api.routes_run import router as run_router
+app.include_router(run_router)
+
+
 # Mount frontend static files if index.html is present
 FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend"
 if FRONTEND_DIR.is_dir() and (FRONTEND_DIR / "index.html").is_file():
