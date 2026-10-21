@@ -101,23 +101,28 @@ async def plan_queries(
     # Post-validation: ensure minimum 2 queries per target country if specified
     if profile.target_countries:
         for country in profile.target_countries:
+            field = profile.field or "Engineering"
+            degree = profile.degree or "Masters"
             country_queries = [q for q in plan_res.queries if country.lower() in q.query.lower()]
-            if len(country_queries) < 2:
-                # Add supplemental query
-                field = profile.field or "Engineering"
-                degree = profile.degree or "Masters"
-                supplemental_query = f"official {country} government and university scholarships for international students {field} {degree}"
-                plan_res.queries.append(
-                    SearchQueryPlan(
-                        query=supplemental_query,
-                        target_country=country,
-                        funding_focus="full",
-                        official_body_focus=True,
-                        intent=f"Country coverage requirement for {country}",
-                    )
+            while len(country_queries) < 2:
+                idx = len(country_queries) + 1
+                if idx == 1:
+                    query_text = f"official {country} government and university scholarships for international students {field} {degree}"
+                else:
+                    query_text = f"top accredited universities in {country} offering fully funded {degree} {field} scholarships"
+
+                new_plan = SearchQueryPlan(
+                    query=query_text,
+                    target_country=country,
+                    funding_focus="full",
+                    official_body_focus=True,
+                    intent=f"Country coverage requirement for {country} (query #{idx})",
                 )
+                plan_res.queries.append(new_plan)
+                country_queries.append(new_plan)
     else:
         plan_res.warnings.append("No target countries specified by student; planned broad international queries.")
+
 
     return plan_res
 
