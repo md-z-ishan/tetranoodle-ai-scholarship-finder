@@ -47,9 +47,10 @@ class GithubTool:
             "Accept": "application/vnd.github.v3+json",
             "User-Agent": "TetraNoodle-Scholarship-Finder/1.0",
         }
-        if self._token and self._token.strip():
+        if self._token and self._token.strip() and "your_github" not in self._token:
             headers["Authorization"] = f"Bearer {self._token.strip()}"
         return headers
+
 
     async def fetch_github_profile(
         self,

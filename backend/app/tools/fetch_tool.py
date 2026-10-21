@@ -164,8 +164,41 @@ class FetchTool:
                             await asyncio.sleep(backoff)
                             continue
 
-                        # Check non-2xx status
+                        # Check non-2xx status (Special WAF 403 / anti-bot handling)
                         if response.status_code >= 400:
+                            # If blocked with 403/401/503 on an official site, attempt Tavily Extract fallback
+                            if response.status_code in (403, 401, 503) and settings.tavily_api_key:
+                                try:
+                                    from tavily import TavilyClient
+                                    t_client = TavilyClient(api_key=settings.tavily_api_key)
+                                    ext_res = await asyncio.to_thread(
+                                        t_client.extract,
+                                        urls=[url],
+                                    )
+                                    results = ext_res.get("results", [])
+                                    if results and results[0].get("raw_content"):
+                                        if telemetry:
+                                            telemetry.record_fallback(
+                                                component="fetch_tool",
+                                                from_provider="httpx_direct",
+                                                to_provider="tavily_extract",
+                                                reason=f"HTTP {response.status_code} WAF/anti-bot bypass",
+                                            )
+                                        raw_c = results[0]["raw_content"]
+                                        _, clean_c = clean_html_text(raw_c) if "<html" in raw_c.lower() else ("", raw_c[:MAX_PAGE_TEXT_CHARS])
+                                        return FetchedPage(
+                                            url=url,
+                                            final_url=url,
+                                            status_code=200,
+                                            link_alive=True,
+                                            fetched_at=timestamp,
+                                            title="Official Portal (Extracted)",
+                                            text=clean_c,
+                                            content_type="text/html",
+                                        )
+                                except Exception as ext_err:
+                                    logger.warning("Tavily extract fallback failed for %s: %s", url, ext_err)
+
                             return FetchedPage(
                                 url=url,
                                 final_url=str(response.url),
@@ -176,6 +209,7 @@ class FetchTool:
                             )
 
                         content_type = response.headers.get("content-type", "").lower()
+
                         # Body size limit check
                         if len(response.content) > MAX_BODY_BYTES:
                             return FetchedPage(
