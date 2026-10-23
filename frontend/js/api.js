@@ -91,6 +91,7 @@ export function streamRunEvents(runId, { onEvent, onComplete, onError }) {
     // List of known event types emitted by FastAPI/sse-starlette
     const eventTypes = [
       'message',
+      'agent_event',
       'start',
       'progress',
       'finish',
@@ -127,6 +128,7 @@ export function streamRunEvents(runId, { onEvent, onComplete, onError }) {
     eventTypes.forEach((type) => {
       eventSource.addEventListener(type, (e) => handleEventPayload(e, type));
     });
+    eventSource.onmessage = (e) => handleEventPayload(e, 'message');
 
     eventSource.onopen = () => {
       reconnectAttempts = 0;
