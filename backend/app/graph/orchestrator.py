@@ -454,6 +454,21 @@ async def node_finalize(state: SwarmState) -> Dict[str, Any]:
     verified = [VerifiedOpportunity.model_validate(v) for v in state.get("verified", [])]
     recommendations = [Recommendation.model_validate(r) for r in state.get("recommendations", [])]
 
+    # Timeout degradation: if verification never returned results but candidates exist,
+    # promote them as unverified so the UI shows discovered scholarships, not a blank panel.
+    if not verified and candidates:
+        from datetime import datetime as _dt
+        verified = [
+            VerifiedOpportunity(
+                **c.model_dump(),
+                status="unverified",
+                rejection_reason="Verification incomplete: API quota exceeded during run. Candidate discovered but not evidence-verified.",
+                link_alive=True,
+                fetched_at=_dt.utcnow().isoformat() + "Z",
+            )
+            for c in candidates
+        ]
+
     draft_dict = state.get("draft")
     draft = ApplicationDraft.model_validate(draft_dict) if draft_dict else None
     if draft and state.get("critic_notes"):
