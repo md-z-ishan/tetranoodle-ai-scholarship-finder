@@ -212,6 +212,9 @@ async def node_verifier(state: SwarmState) -> Dict[str, Any]:
     try:
         candidates_raw = state.get("candidates", [])
         candidates = [Opportunity.model_validate(c) for c in candidates_raw]
+        from app.tools.domains import is_official_domain
+        candidates.sort(key=lambda c: 0 if is_official_domain(c.url or "") else 1)
+        candidates = candidates[:settings.max_candidates]
         profile_obj = StudentProfile.model_validate(state["profile"])
 
         verified = await run_verifier(
@@ -604,11 +607,17 @@ async def run_pipeline(
 
     max_sec = timeout_seconds or settings.max_run_seconds
 
+    accumulated_state = dict(initial_state)
+
     try:
-        final_state = await asyncio.wait_for(
-            swarm_pipeline.ainvoke(initial_state),
-            timeout=max_sec,
-        )
+        async def _run_stream():
+            async for output in swarm_pipeline.astream(initial_state):
+                for _, node_output in output.items():
+                    if isinstance(node_output, dict):
+                        accumulated_state.update(node_output)
+            return accumulated_state
+
+        final_state = await asyncio.wait_for(_run_stream(), timeout=max_sec)
         res_dict = final_state.get("run_result")
         if res_dict:
             return RunResult.model_validate(res_dict)
@@ -622,7 +631,7 @@ async def run_pipeline(
                 message=f"Global timeout ({max_sec}s) reached; finalizing with available results.",
                 level="warn",
             ))
-        fallback_res = await node_finalize(initial_state)
+        fallback_res = await node_finalize(accumulated_state)
         return RunResult.model_validate(fallback_res["run_result"])
     finally:
         unregister_context(run_id)

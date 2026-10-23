@@ -498,25 +498,44 @@ async def _verify_one(
             continue
 
         # Degree level comparison
-        degree_keywords = {"master", "msc", "ms", "phd", "bachelor", "undergraduate", "postgraduate"}
+        degree_keywords = ["master", "msc", "ms", "postgraduate", "phd", "doctoral", "bachelor", "undergraduate"]
         for kw in degree_keywords:
             if kw in crit_lower:
-                if profile.degree and kw in profile.degree.lower():
-                    eligibility_met.append(f"Degree level match: {kw}")
-                elif profile.degree:
-                    eligibility_gaps.append(f"Degree mismatch: page requires '{kw}', profile is '{profile.degree}'")
-                else:
-                    needs_from_student.append(f"Degree level needed to verify: {kw}")
+                target_deg = (profile.target_degree_level or "Master").lower()
+                curr_deg = (profile.degree or "").lower()
+                if kw in ["master", "msc", "ms", "postgraduate"]:
+                    if any(t in target_deg for t in ["master", "msc", "ms", "postgraduate"]) or "bachelor" in curr_deg:
+                        eligibility_met.append(f"Degree progression match: {kw} (student target: {profile.target_degree_level or 'Master'})")
+                    else:
+                        eligibility_gaps.append(f"Degree mismatch: page is for '{kw}', student target is '{profile.target_degree_level}'")
+                elif kw in ["phd", "doctoral"]:
+                    if any(t in target_deg for t in ["phd", "doctoral", "research"]):
+                        eligibility_met.append(f"Degree level match: {kw}")
+                    else:
+                        eligibility_gaps.append(f"Degree mismatch: page requires PhD, student target is '{profile.target_degree_level}'")
+                elif kw in ["bachelor", "undergraduate"]:
+                    if is_grad and ("high school" in crit_lower or "diploma" in crit_lower or "undergraduate only" in crit_lower):
+                        eligibility_gaps.append(f"Degree mismatch: page is for pre-degree/undergraduate students, student target is '{profile.target_degree_level}'")
+                    else:
+                        eligibility_met.append(f"Undergraduate credential match: {kw}")
                 break
         else:
             # Can't determine deterministically — use LLM comparison below
             pass
 
-    # LLM-only comparison for criteria we can't check deterministically
+    # Fast deterministic field and general criteria check to conserve rate limits
+    if grounded_eligibility:
+        field_lower = (profile.field or "computer science").lower()
+        for c in grounded_eligibility:
+            c_low = c.lower()
+            if any(term in c_low for term in [field_lower, "stem", "computer", "engineering", "technology", "all fields", "any subject", "open to all", "all disciplines", "merit", "academic excellence"]):
+                eligibility_met.append(f"Criterion aligned: {c}")
+
+    # LLM fallback comparison for remaining complex criteria if any
     if grounded_eligibility and profile.field:
         remaining_criteria = [c for c in grounded_eligibility
-                              if not any(kw in c.lower() for kw in ["gpa", "cgpa", "grade"] + list({"master", "phd", "bachelor"}))]
-        if remaining_criteria:
+                              if not any(kw in c.lower() for kw in ["gpa", "cgpa", "grade", "master", "phd", "bachelor", "stem", "computer", "all fields"])]
+        if remaining_criteria and len(remaining_criteria) <= 3:
             try:
                 class EligibilityResult(BaseModel):
                     met: List[str] = Field(default_factory=list)

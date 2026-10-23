@@ -178,8 +178,9 @@ class GeminiClient:
                         active_model = self._fallback_model
                         if telemetry:
                             telemetry.record_fallback(
-                                primary_tool="gemini_primary",
-                                fallback_tool="gemini_fallback_model",
+                                component="gemini_llm",
+                                from_provider=self._model_name,
+                                to_provider=self._fallback_model,
                                 reason=f"Repeated 429 on {self._model_name}; switched to {self._fallback_model}",
                             )
 
@@ -292,8 +293,9 @@ class GeminiClient:
                         active_model = self._fallback_model
                         if telemetry:
                             telemetry.record_fallback(
-                                primary_tool="gemini_primary",
-                                fallback_tool="gemini_fallback_model",
+                                component="gemini_llm_json",
+                                from_provider=self._model_name,
+                                to_provider=self._fallback_model,
                                 reason=f"Repeated 429 on {self._model_name}; switched to {self._fallback_model}",
                             )
 

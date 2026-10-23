@@ -27,15 +27,15 @@ class Settings(BaseSettings):
     # API Keys (Optional at startup; validated on first agent tool access)
     gemini_api_key: Optional[str] = Field(default=None, alias="GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
-    gemini_fallback_model: str = Field(default="gemini-2.0-flash", alias="GEMINI_FALLBACK_MODEL")
+    gemini_fallback_model: str = Field(default="gemini-3.5-flash-lite", alias="GEMINI_FALLBACK_MODEL")
     gemini_rpm: int = Field(default=4, alias="GEMINI_RPM")
     tavily_api_key: Optional[str] = Field(default=None, alias="TAVILY_API_KEY")
     github_token: Optional[str] = Field(default=None, alias="GITHUB_TOKEN")
 
     # Timeouts & Limits
-    max_run_seconds: int = Field(default=180, alias="MAX_RUN_SECONDS")
+    max_run_seconds: int = Field(default=420, alias="MAX_RUN_SECONDS")
     fetch_timeout_seconds: int = Field(default=10, alias="FETCH_TIMEOUT_SECONDS")
-    max_candidates: int = Field(default=15, alias="MAX_CANDIDATES")
+    max_candidates: int = Field(default=8, alias="MAX_CANDIDATES")
 
     # Server configs
     host: str = Field(default="0.0.0.0", alias="HOST")

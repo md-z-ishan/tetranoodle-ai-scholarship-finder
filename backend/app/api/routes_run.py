@@ -120,6 +120,7 @@ async def _execute_swarm_task(
             level="success",
             payload={"event": "complete", "run_id": run_id},
         ))
+        await event_bus.close_run(run_id)
 
     except Exception as exc:
         logger.exception("Swarm background execution failed for %s: %s", run_id, exc)
@@ -137,6 +138,7 @@ async def _execute_swarm_task(
             level="error",
             payload={"event": "error", "error": str(exc)},
         ))
+        await event_bus.close_run(run_id)
 
 
 # ---------------------------------------------------------------------------
@@ -254,63 +256,36 @@ async def stream_run_events(run_id: str):
         )
 
     async def event_generator():
-        # Step A: Replay existing events from EventBus
-        history = event_bus.replay(run_id)
-        seen_ids = set()
-        for evt in history:
-            seen_ids.add(evt.event_id)
-            yield {
-                "event": "agent_event",
-                "data": json.dumps(evt.model_dump(), default=str),
-            }
-
-        # Check if already completed
+        seen_keys = set()
         meta_path = run_dir / "meta.json"
-        is_completed = False
-        if meta_path.exists():
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                if meta.get("status") in ("completed", "failed"):
-                    is_completed = True
-            except Exception:
-                pass
 
-        if is_completed:
+        try:
+            async for event in event_bus.subscribe(run_id, replay_history=True):
+                evt_key = f"{event.agent}:{event.message}:{event.timestamp}"
+                if evt_key in seen_keys:
+                    continue
+                seen_keys.add(evt_key)
+
+                yield {
+                    "event": "agent_event",
+                    "data": json.dumps(event.model_dump(), default=str),
+                }
+
+                # Check for completion marker in payload
+                if event.payload and event.payload.get("event") in ("complete", "error"):
+                    yield {
+                        "event": "complete",
+                        "data": json.dumps({"run_id": run_id, "status": "completed"}),
+                    }
+                    return
+
+            # Signal completion if stream terminated after run close
             yield {
                 "event": "complete",
                 "data": json.dumps({"run_id": run_id, "status": "completed"}),
             }
-            return
-
-        # Step B: Stream live events as they occur
-        queue = await event_bus.subscribe(run_id)
-        try:
-            while True:
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=25.0)
-                    if event.event_id in seen_ids:
-                        continue
-                    seen_ids.add(event.event_id)
-
-                    yield {
-                        "event": "agent_event",
-                        "data": json.dumps(event.model_dump(), default=str),
-                    }
-
-                    # Check for completion marker in payload
-                    if event.payload and event.payload.get("event") in ("complete", "error"):
-                        yield {
-                            "event": "complete",
-                            "data": json.dumps({"run_id": run_id, "status": "completed"}),
-                        }
-                        break
-
-                except asyncio.TimeoutError:
-                    # Send periodic keep-alive comment so proxies/browsers don't drop the connection
-                    yield {"event": "ping", "data": "keep-alive"}
-
-        finally:
-            event_bus.unsubscribe(run_id, queue)
+        except asyncio.CancelledError:
+            pass
 
     return EventSourceResponse(event_generator())
 
