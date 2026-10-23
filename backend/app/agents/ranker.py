@@ -270,6 +270,32 @@ async def run_ranker(
         and v.deadline_status != "passed"
         and not v.eligibility_gaps
     ]
+
+    # Graceful quota-pressure fallback: if Gemini rate limits caused all
+    # candidates to time out as 'unverified', surface them anyway at reduced
+    # confidence rather than returning zero results to the student.
+    if not scoreable:
+        scoreable = [
+            v for v in verified
+            if v.status == "unverified"
+            and v.deadline_status != "passed"
+            and not (v.rejection_reason or "").startswith("Deadline")
+            and not v.eligibility_gaps
+        ]
+        if scoreable and emit:
+            await emit(AgentEvent(
+                run_id=run_id, agent="Ranker",
+                message=(
+                    f"All {len(verified)} candidates timed out during LLM verification (Gemini quota pressure). "
+                    f"Surfacing {len(scoreable)} unverified candidates at reduced confidence as best-effort results."
+                ),
+                level="warn",
+            ))
+        # Cap confidence for unverified candidates so UI shows them as low-confidence
+        for v in scoreable:
+            if v.confidence == 0.0:
+                v.confidence = 0.25
+
     scored: List[Tuple[float, ScoreBreakdown, VerifiedOpportunity]] = []
 
     for opp in scoreable:

@@ -660,9 +660,9 @@ async def run_verifier(
 
     semaphore = asyncio.Semaphore(concurrency)
     # Hard per-candidate wall-clock cap — prevents a single 429/503 storm from
-    # blocking all results. 60 s covers: fetch (10 s) + sub-links (10 s) + LLM
-    # with one retry+backoff (30 s) + grounding (5 s) + headroom.
-    _CANDIDATE_TIMEOUT = 60.0
+    # blocking all results. 90 s covers: fetch (10 s) + sub-links (10 s) + LLM
+    # with two retries+backoff (50 s) + grounding (5 s) + headroom.
+    _CANDIDATE_TIMEOUT = 90.0
 
     async def _safe_verify(c: Opportunity) -> VerifiedOpportunity:
         async with semaphore:
