@@ -94,32 +94,32 @@ The pipeline uses **7 specialized agent roles** coordinated via **LangGraph**:
 
 ```mermaid
 flowchart TD
-    User([Student / Rahul]) -->|Uploads Resume + Marksheet + Target Preferences| UI[Web Dashboard / UI]
-    UI -->|POST /api/runs| Orch[1. Orchestrator\nLangGraph StateGraph Coordinator]
+    User(["Student / Rahul"]) -->|"Uploads Resume + Marksheet + Target Preferences"| UI["Web Dashboard / UI"]
+    UI -->|"POST /api/runs"| Orch["1. Orchestrator<br/>LangGraph StateGraph Coordinator"]
     
     subgraph Swarm ["Autonomous Multi-Agent Swarm"]
-        Orch --> PA[2. Profile Analyst]
-        PA -->|PDF Text Parser + GitHub REST API| PA_Done[Grounded Student Profile]
+        Orch --> PA["2. Profile Analyst"]
+        PA -->|"PDF Text Parser + GitHub REST API"| PA_Done["Grounded Student Profile"]
         
-        PA_Done --> Scout[3. Scout]
-        Scout -->|Multi-country Queries\nTavily + DuckDuckGo Fallback| Hits[10+ Candidate Opportunities]
+        PA_Done --> Scout["3. Scout"]
+        Scout -->|"Multi-country Queries<br/>Tavily + DuckDuckGo Fallback"| Hits["10+ Candidate Opportunities"]
         
-        Hits --> Verifier[4. Verifier]
-        Verifier -->|Live HTTPX Crawler + Tavily Extract\nEligibility & Deadline Verification| V_Done[Audited Opportunities]
+        Hits --> Verifier["4. Verifier"]
+        Verifier -->|"Live HTTPX Crawler + Tavily Extract<br/>Eligibility & Deadline Verification"| V_Done["Audited Opportunities"]
         
-        V_Done --> Ranker[5. Ranker]
-        Ranker -->|Transparent Multi-factor Scoring\nFit 40%, Funding 25%, Urgency 15%, Risk 20%| Top5[Top 5 Recommendations]
+        V_Done --> Ranker["5. Ranker"]
+        Ranker -->|"Transparent Multi-factor Scoring<br/>Fit 40%, Funding 25%, Urgency 15%, Risk 20%"| Top5["Top 5 Recommendations"]
         
-        Top5 --> Writer[6. Writer]
-        Writer -->|Synthesizes SOP for Top Match| Draft[SOP Draft]
+        Top5 --> Writer["6. Writer"]
+        Writer -->|"Synthesizes SOP for Top Match"| Draft["SOP Draft"]
         
-        Draft --> Critic[7. Critic]
-        Critic -->|Adversarial Hallucination Audit| CriticDecision{Audit Passed?}
-        CriticDecision -- "Revisions Needed (Max 2)" --> Writer
-        CriticDecision -- "Verified & Grounded" --> FinalResult[Approved SOP + Advisory Report]
+        Draft --> Critic["7. Critic"]
+        Critic -->|"Adversarial Hallucination Audit"| CriticDecision{"Audit Passed?"}
+        CriticDecision -->|"Revisions Needed (Max 2)"| Writer
+        CriticDecision -->|"Verified & Grounded"| FinalResult["Approved SOP + Advisory Report"]
     end
     
-    Orch -.->|Live Server-Sent Events (SSE)| UI
+    Orch -. "Live Server-Sent Events (SSE)" .-> UI
     FinalResult --> UI
 ```
 
