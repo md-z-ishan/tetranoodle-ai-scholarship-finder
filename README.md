@@ -20,6 +20,37 @@ Unlike conversational wrappers or static scrapers:
 
 ## 🏗️ Multi-Agent Swarm Architecture
 
+```mermaid
+flowchart TD
+    User([Student / Rahul]) -->|Uploads Resume + Marksheet + Target Preferences| UI[Web Dashboard / UI]
+    UI -->|POST /api/runs| Orch[1. Orchestrator\nLangGraph Coordinator]
+    
+    subgraph Swarm ["Autonomous Multi-Agent Swarm"]
+        Orch --> PA[2. Profile Analyst]
+        PA -->|PDF Text Parser + GitHub REST API| PA_Done[Grounded Student Profile]
+        
+        PA_Done --> Scout[3. Scout]
+        Scout -->|Multi-country Queries\nTavily + DuckDuckGo Fallback| Hits[10+ Candidate Opportunities]
+        
+        Hits --> Verifier[4. Verifier]
+        Verifier -->|Live Crawler + Tavily Extract Fallback\nEligibility & Deadline Verification| V_Done[Audited Opportunities]
+        
+        V_Done --> Ranker[5. Ranker]
+        Ranker -->|Transparent Multi-factor Scoring\nFit 40%, Funding 25%, Urgency 15%, Risk 20%| Top5[Top 5 Recommendations]
+        
+        Top5 --> Writer[6. Writer]
+        Writer -->|Synthesizes SOP for Top 1 Opportunity| Draft[SOP Draft]
+        
+        Draft --> Critic[7. Critic]
+        Critic -->|Adversarial Hallucination Audit| CriticDecision{Audit Passed?}
+        CriticDecision -- "Revisions Needed (Max 2)" --> Writer
+        CriticDecision -- "Verified & Grounded" --> FinalResult[Approved SOP + Advisory Report]
+    end
+    
+    Orch -.->|Live Server-Sent Events (SSE)| UI
+    FinalResult --> UI
+```
+
 The pipeline uses **7 specialized agent roles** coordinated via **LangGraph**:
 
 1. **Orchestrator**: Routes state between agents, handles timeouts, retries, and broadcasts real-time execution events via Server-Sent Events (SSE).
@@ -29,6 +60,8 @@ The pipeline uses **7 specialized agent roles** coordinated via **LangGraph**:
 5. **Ranker**: Applies transparent multi-factor scoring (academic fit, funding coverage, deadline urgency, risk) to select the Top 5 opportunities.
 6. **Writer**: Synthesizes a tailored, compelling Statement of Purpose (SOP) draft for the top match using strictly verified student profile facts.
 7. **Critic**: Performs a strict factual audit of the SOP draft, demanding evidence verification and managing a real revision loop.
+
+> 📖 **Full Submission Notes & Experiments Log**: See [docs/submission_notes.md](docs/submission_notes.md) and [docs/experiments.md](docs/experiments.md) for details on engineering trials, WAF recoveries, rate limit mitigations, and the Critic's adversarial audit loop.
 
 ---
 

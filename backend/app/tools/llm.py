@@ -3,18 +3,22 @@
 Features:
 - Structured output using Pydantic schemas (response_schema / json mode).
 - Defensive one-shot JSON repair loop when output validation fails.
-- Exponential backoff retry on 429 rate limit or 5xx transient server errors.
+- Exponential backoff with jitter on 429 / 503 transient errors.
+- Retry-After header respected when present in the API error.
+- Shared retry budget across primary + fallback model to avoid storm.
 - Async semaphore concurrency limiter + global token-bucket rate limiter (GEMINI_RPM).
 - On-disk persistent prompt cache in data/cache/ (hash of model + prompt + schema).
 - Fallback model (GEMINI_FALLBACK_MODEL) triggered upon repeated 429 quota exhaustion.
 - Token usage & call counter logging in run Telemetry.
 - Clear, human-readable model error handling on unrecognized model names.
+- QuotaExhaustedError raised when total retry budget is spent on both models.
 """
 
 import asyncio
 import hashlib
 import json
 import logging
+import random
 import re
 import time
 from pathlib import Path
@@ -39,6 +43,28 @@ _llm_semaphore = asyncio.Semaphore(DEFAULT_CONCURRENCY_LIMIT)
 
 # Disk cache directory
 CACHE_DIR = Path("data/cache")
+
+# ---------------------------------------------------------------------------
+# Retry budget constants
+# ---------------------------------------------------------------------------
+# Total number of attempts across primary + fallback combined.
+# e.g. 4 means: try primary up to 2 times, switch to fallback, try fallback up to 2 more times.
+DEFAULT_MAX_RETRIES = 4
+# Max backoff ceiling (seconds) — caps exponential growth to avoid blocking run for minutes
+MAX_BACKOFF_SECONDS = 30.0
+# Jitter fraction applied to backoff to desynchronise parallel callers
+JITTER_FACTOR = 0.3
+
+
+# ---------------------------------------------------------------------------
+# Quota exhaustion sentinel
+# ---------------------------------------------------------------------------
+
+class QuotaExhaustedError(RuntimeError):
+    """Raised when both primary and fallback Gemini models are quota-exhausted
+    and the total retry budget has been spent.  Callers MUST catch this and
+    degrade gracefully — never silently swallow or retry."""
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +91,26 @@ class TokenBucketRateLimiter:
 
 
 _rate_limiter = TokenBucketRateLimiter(rpm=settings.gemini_rpm)
+
+
+# ---------------------------------------------------------------------------
+# Backoff helper
+# ---------------------------------------------------------------------------
+
+def _compute_backoff(attempt: int, error_str: str) -> float:
+    """Exponential backoff with jitter, respecting Retry-After if present."""
+    # Try to parse Retry-After from error text (Google API sometimes includes it)
+    retry_after_match = re.search(r"[Rr]etry.?[Aa]fter[\":\s]+(\d+)", error_str)
+    if retry_after_match:
+        base = float(retry_after_match.group(1))
+    else:
+        base = min(2.0 ** attempt, MAX_BACKOFF_SECONDS)
+    jitter = random.uniform(0, JITTER_FACTOR * base)
+    return round(base + jitter, 2)
+
+
+def _is_quota_error(err_str: str) -> bool:
+    return any(k in err_str for k in ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE"))
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +148,15 @@ def _write_cache(cache_path: Path, content: str):
 # ---------------------------------------------------------------------------
 
 class GeminiClient:
-    """Production-grade LLM wrapper with structured outputs, repair, and rate-limit guardrails."""
+    """Production-grade LLM wrapper with structured outputs, repair, and rate-limit guardrails.
+
+    Retry policy (Phase 8):
+    - Total attempts shared across primary + fallback model = max_retries (default 4).
+    - Fallback model is activated after attempt >= 2 on primary.
+    - On each retryable error: exponential backoff with jitter, Retry-After respected.
+    - When budget is exhausted on both models: raises QuotaExhaustedError (not RuntimeError).
+    - 503 treated identically to 429 (service unavailable = transient quota pressure).
+    """
 
     def __init__(self, api_key: Optional[str] = None, model_name: Optional[str] = None):
         self._explicit_key = api_key
@@ -122,9 +176,14 @@ class GeminiClient:
         prompt: str,
         system_instruction: Optional[str] = None,
         telemetry: Optional[Telemetry] = None,
-        max_retries: int = 3,
+        max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> str:
-        """Generate unstructured markdown/text response with rate limiting, cache, and fallback."""
+        """Generate unstructured markdown/text response with rate limiting, cache, and fallback.
+
+        Raises:
+            QuotaExhaustedError: when all retry budget is spent on quota errors.
+            ValueError: when the model name is invalid.
+        """
         cache_path = _get_cache_path(self._model_name, prompt, system_instruction, "text")
         cached = _read_cache(cache_path)
         if cached is not None:
@@ -134,10 +193,13 @@ class GeminiClient:
 
         client = self._get_client()
         active_model = self._model_name
+        fallback_activated = False
 
         config = types.GenerateContentConfig()
         if system_instruction:
             config.system_instruction = system_instruction
+
+        last_error: Optional[Exception] = None
 
         async with _llm_semaphore:
             for attempt in range(1, max_retries + 1):
@@ -168,38 +230,65 @@ class GeminiClient:
 
                 except APIError as exc:
                     err_str = str(exc)
-                    if "models/" in err_str and ("not found" in err_str.lower() or "not supported" in err_str.lower()):
+                    last_error = exc
+
+                    # Hard stop on unknown model — no point retrying
+                    if "models/" in err_str and (
+                        "not found" in err_str.lower() or "not supported" in err_str.lower()
+                    ):
                         raise ValueError(
                             f"Gemini model '{active_model}' was not found or is not supported. "
                             f"Please update GEMINI_MODEL in backend/.env to a supported model (e.g. gemini-2.5-flash)."
                         ) from exc
 
-                    if attempt >= 2 and active_model != self._fallback_model:
-                        active_model = self._fallback_model
-                        if telemetry:
-                            telemetry.record_fallback(
-                                component="gemini_llm",
-                                from_provider=self._model_name,
-                                to_provider=self._fallback_model,
-                                reason=f"Repeated 429 on {self._model_name}; switched to {self._fallback_model}",
+                    if _is_quota_error(err_str):
+                        # Switch to fallback model after first failure on primary
+                        if not fallback_activated and active_model != self._fallback_model:
+                            fallback_activated = True
+                            active_model = self._fallback_model
+                            if telemetry:
+                                telemetry.record_fallback(
+                                    component="gemini_llm",
+                                    from_provider=self._model_name,
+                                    to_provider=self._fallback_model,
+                                    reason=f"Quota error on {self._model_name}; switched to {self._fallback_model}",
+                                )
+                            logger.warning(
+                                "generate_text: switched to fallback model %s after quota error on %s (attempt %d)",
+                                self._fallback_model, self._model_name, attempt,
                             )
 
-                    if attempt < max_retries and ("429" in err_str or "503" in err_str or "RESOURCE_EXHAUSTED" in err_str):
-                        backoff = 2.0 ** attempt + 1.0
+                        if attempt < max_retries:
+                            backoff = _compute_backoff(attempt, err_str)
+                            if telemetry:
+                                telemetry.record_retry(
+                                    component="gemini_llm",
+                                    attempt=attempt,
+                                    reason=f"Quota/unavailable ({err_str[:80]}); backoff {backoff}s",
+                                    backoff_seconds=backoff,
+                                )
+                            logger.debug("generate_text: backoff %.1fs (attempt %d/%d)", backoff, attempt, max_retries)
+                            await asyncio.sleep(backoff)
+                            continue
+
+                        # Budget exhausted
                         if telemetry:
-                            telemetry.record_retry(
-                                component="gemini_llm",
-                                attempt=attempt,
-                                reason=f"Rate limit / transient error: {err_str[:120]}",
-                                backoff_seconds=backoff,
+                            telemetry.record_failure(
+                                "gemini_llm",
+                                error=f"QuotaExhausted after {max_retries} attempts: {err_str[:120]}",
+                                fatal=True,
                             )
-                        await asyncio.sleep(backoff)
-                        continue
+                        raise QuotaExhaustedError(
+                            f"Gemini quota exhausted after {max_retries} attempts "
+                            f"(primary={self._model_name}, fallback={self._fallback_model}): {err_str[:200]}"
+                        ) from exc
+
+                    # Non-quota API error — record and re-raise immediately
                     if telemetry:
                         telemetry.record_failure("gemini_llm", error=err_str, fatal=True)
                     raise
 
-        raise RuntimeError("Exhausted retries in generate_text")
+        raise QuotaExhaustedError(f"generate_text: retry budget exhausted. Last error: {last_error}")
 
     async def generate_json(
         self,
@@ -207,9 +296,14 @@ class GeminiClient:
         schema: Type[T],
         system_instruction: Optional[str] = None,
         telemetry: Optional[Telemetry] = None,
-        max_retries: int = 3,
+        max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> T:
-        """Generate structured JSON adhering to a Pydantic schema with defensive cache, repair, and rate limits."""
+        """Generate structured JSON adhering to a Pydantic schema with defensive cache, repair, and rate limits.
+
+        Raises:
+            QuotaExhaustedError: when all retry budget is spent on quota errors.
+            RuntimeError: when JSON repair also fails.
+        """
         # Check disk cache first
         schema_json_str = json.dumps(schema.model_json_schema(), sort_keys=True)
         cache_path = _get_cache_path(self._model_name, prompt, system_instruction, schema_json_str)
@@ -225,6 +319,7 @@ class GeminiClient:
 
         client = self._get_client()
         active_model = self._model_name
+        fallback_activated = False
 
         # Inline all $ref definitions so Gemini SDK t_schema never sees dangling refs.
         def _inline_refs(d: Any, defs: Dict[str, Any]) -> Any:
@@ -250,8 +345,8 @@ class GeminiClient:
         if system_instruction:
             config.system_instruction = system_instruction
 
-        last_error = None
-        raw_text = None
+        last_error: Optional[Exception] = None
+        raw_text: Optional[str] = None
 
         async with _llm_semaphore:
             for attempt in range(1, max_retries + 1):
@@ -283,33 +378,67 @@ class GeminiClient:
 
                 except APIError as exc:
                     err_str = str(exc)
-                    if "models/" in err_str and ("not found" in err_str.lower() or "not supported" in err_str.lower()):
+                    last_error = exc
+
+                    # Hard stop on unknown model
+                    if "models/" in err_str and (
+                        "not found" in err_str.lower() or "not supported" in err_str.lower()
+                    ):
                         raise ValueError(
                             f"Gemini model '{active_model}' was not found or is not supported. "
                             f"Please update GEMINI_MODEL in backend/.env to a supported model (e.g. gemini-2.5-flash)."
                         ) from exc
 
-                    if attempt >= 2 and active_model != self._fallback_model:
-                        active_model = self._fallback_model
-                        if telemetry:
-                            telemetry.record_fallback(
-                                component="gemini_llm_json",
-                                from_provider=self._model_name,
-                                to_provider=self._fallback_model,
-                                reason=f"Repeated 429 on {self._model_name}; switched to {self._fallback_model}",
+                    if _is_quota_error(err_str):
+                        # Switch to fallback after first quota failure on primary
+                        if not fallback_activated and active_model != self._fallback_model:
+                            fallback_activated = True
+                            active_model = self._fallback_model
+                            # Reconfigure schema for new model
+                            config = types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                response_schema=cleaned_schema,
+                            )
+                            if system_instruction:
+                                config.system_instruction = system_instruction
+                            if telemetry:
+                                telemetry.record_fallback(
+                                    component="gemini_llm_json",
+                                    from_provider=self._model_name,
+                                    to_provider=self._fallback_model,
+                                    reason=f"Quota error on {self._model_name}; switched to {self._fallback_model}",
+                                )
+                            logger.warning(
+                                "generate_json: switched to fallback model %s (attempt %d)",
+                                self._fallback_model, attempt,
                             )
 
-                    if attempt < max_retries and ("429" in err_str or "503" in err_str or "RESOURCE_EXHAUSTED" in err_str):
-                        backoff = 2.0 ** attempt + 1.0
+                        if attempt < max_retries:
+                            backoff = _compute_backoff(attempt, err_str)
+                            if telemetry:
+                                telemetry.record_retry(
+                                    component="gemini_llm_json",
+                                    attempt=attempt,
+                                    reason=f"Quota/unavailable ({err_str[:80]}); backoff {backoff}s",
+                                    backoff_seconds=backoff,
+                                )
+                            logger.debug("generate_json: backoff %.1fs (attempt %d/%d)", backoff, attempt, max_retries)
+                            await asyncio.sleep(backoff)
+                            continue
+
+                        # Budget exhausted
                         if telemetry:
-                            telemetry.record_retry(
-                                component="gemini_llm_json",
-                                attempt=attempt,
-                                reason=f"Rate limit / transient error: {err_str[:120]}",
-                                backoff_seconds=backoff,
+                            telemetry.record_failure(
+                                "gemini_llm_json",
+                                error=f"QuotaExhausted after {max_retries} attempts: {err_str[:120]}",
+                                fatal=True,
                             )
-                        await asyncio.sleep(backoff)
-                        continue
+                        raise QuotaExhaustedError(
+                            f"Gemini quota exhausted after {max_retries} attempts "
+                            f"(primary={self._model_name}, fallback={self._fallback_model}): {err_str[:200]}"
+                        ) from exc
+
+                    # Non-quota API error
                     last_error = exc
                     break
 
@@ -318,7 +447,7 @@ class GeminiClient:
                     last_error = exc
                     break
 
-        # Defensive JSON Repair Loop
+        # Defensive JSON Repair Loop (only reached if LLM returned something but validation failed)
         if raw_text:
             try:
                 cleaned_text = raw_text.strip()
@@ -331,7 +460,7 @@ class GeminiClient:
             except Exception:
                 pass
 
-            # One-shot LLM repair
+            # One-shot LLM repair (only if we got a response but it failed validation)
             repair_prompt = (
                 f"The following JSON response failed validation for the requested schema.\n"
                 f"Please fix syntax or structure errors and output strictly valid JSON:\n\n"

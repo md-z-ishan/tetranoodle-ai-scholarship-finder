@@ -69,6 +69,23 @@ async def _execute_swarm_task(
                 f.write(json.dumps(event.model_dump(), default=str) + "\n")
         except Exception as e:
             logger.debug("Failed writing event log for %s: %s", run_id, e)
+        # 3. Phase 8: Early meta update — write student_name as soon as ProfileAnalyst finishes
+        if (
+            event.agent == "ProfileAnalyst"
+            and event.level == "success"
+            and "Profile ready" in (event.message or "")
+        ):
+            try:
+                meta_raw = json.loads(meta_path.read_text(encoding="utf-8"))
+                # Extract name from message: "Profile ready: <degree>, CGPA ..."
+                # Payload doesn't carry name, so we update when result arrives instead.
+                # Here we just replace the placeholder so the UI shows a generic update.
+                if meta_raw.get("student_name") == "Parsing in progress\u2026":
+                    meta_raw["student_name"] = "Profile extracted\u2014name available after completion"
+                    meta_path.write_text(json.dumps(meta_raw, indent=2), encoding="utf-8")
+            except Exception as meta_exc:
+                logger.debug("Early meta update skipped for %s: %s", run_id, meta_exc)
+
 
     try:
         result: RunResult = await run_pipeline(

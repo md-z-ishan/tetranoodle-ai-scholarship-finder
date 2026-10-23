@@ -223,16 +223,57 @@ async def run_scout(
     profile: StudentProfile,
     target_count: int = 10,
     max_candidates: int = 15,
+    max_queries: int = 20,  # Phase 8: configurable query budget
     run_id: str = "run-scout",
     emit: EmitCallback = None,
     telemetry: Optional[Telemetry] = None,
 ) -> List[Opportunity]:
-    """Execute end-to-end Scout pipeline: Query Planning -> Live Search -> Resolution -> Triage."""
+    """Execute end-to-end Scout pipeline: Query Planning -> Live Search -> Resolution -> Triage.
+
+    Args:
+        max_queries: Hard upper limit on search queries executed (default 20).
+            Country coverage (>=2 per target country) is guaranteed before trimming.
+            Any trimming is recorded in telemetry. Setting to 0 disables the budget.
+    """
     if emit:
         await emit(AgentEvent(run_id=run_id, agent="Scout", message="Planning targeted search queries from student profile...", level="info"))
 
     # Step 1: Query Planning
     query_plan = await plan_queries(profile, telemetry=telemetry)
+
+    # Phase 8: Apply query budget — preserve country coverage first, then trim extras
+    if max_queries > 0 and len(query_plan.queries) > max_queries:
+        country_queries: List[SearchQueryPlan] = []
+        other_queries: List[SearchQueryPlan] = []
+        if profile.target_countries:
+            country_set = {c.lower() for c in profile.target_countries}
+            for q in query_plan.queries:
+                if q.target_country and q.target_country.lower() in country_set:
+                    country_queries.append(q)
+                else:
+                    other_queries.append(q)
+        else:
+            other_queries = list(query_plan.queries)
+
+        # Keep all country queries (guaranteed coverage) + fill remaining budget from others
+        budget_remaining = max(0, max_queries - len(country_queries))
+        trimmed_queries = country_queries + other_queries[:budget_remaining]
+        n_dropped = len(query_plan.queries) - len(trimmed_queries)
+
+        if n_dropped > 0:
+            logger.info("Scout: query budget trimmed %d queries (%d -> %d)", n_dropped, len(query_plan.queries), len(trimmed_queries))
+            if telemetry:
+                telemetry.record_failure(
+                    "scout_query_budget",
+                    error=f"Query budget ({max_queries}) trimmed {n_dropped} queries to stay within limit.",
+                    fatal=False,
+                )
+            query_plan.queries = trimmed_queries
+            query_plan.warnings.append(
+                f"Query budget limit ({max_queries}): {n_dropped} queries dropped. "
+                f"Country coverage preserved ({len(country_queries)} country-specific queries retained)."
+            )
+
     if emit:
         await emit(AgentEvent(
             run_id=run_id,
@@ -288,7 +329,8 @@ async def run_scout(
     )
 
     # Step 5: Second-Pass Recovery if fewer than target
-    if len(candidates) < target_count:
+    remaining_budget = (max_queries - len(query_plan.queries)) if max_queries > 0 else None
+    if len(candidates) < target_count and (remaining_budget is None or remaining_budget > 0):
         if emit:
             await emit(AgentEvent(
                 run_id=run_id,
@@ -311,24 +353,27 @@ async def run_scout(
             f"international student tuition fee waiver {target_lvl} {field} scholarships official",
             f"commonwealth and bilateral government scholarships {target_lvl} international students",
         ]
+        if remaining_budget is not None:
+            broad_queries = broad_queries[:remaining_budget]
 
-        broad_tasks = [search_tool.search(bq, max_results=4, telemetry=telemetry) for bq in broad_queries]
-        second_pass_results = await asyncio.gather(*broad_tasks, return_exceptions=True)
-        second_hits: List[SearchHit] = []
-        for r in second_pass_results:
-            if isinstance(r, list):
-                second_hits.extend(r)
+        if broad_queries:
+            broad_tasks = [search_tool.search(bq, max_results=4, telemetry=telemetry) for bq in broad_queries]
+            second_pass_results = await asyncio.gather(*broad_tasks, return_exceptions=True)
+            second_hits: List[SearchHit] = []
+            for r in second_pass_results:
+                if isinstance(r, list):
+                    second_hits.extend(r)
 
-        second_candidates = await triage_hits_to_candidates(
-            second_hits,
-            target_degree_level=profile.target_degree_level,
-            telemetry=telemetry,
-        )
-        for sc in second_candidates:
-            if normalize_url_key(sc.url) not in {normalize_url_key(c.url) for c in candidates}:
-                candidates.append(sc)
-                if len(candidates) >= max_candidates:
-                    break
+            second_candidates = await triage_hits_to_candidates(
+                second_hits,
+                target_degree_level=profile.target_degree_level,
+                telemetry=telemetry,
+            )
+            for sc in second_candidates:
+                if normalize_url_key(sc.url) not in {normalize_url_key(c.url) for c in candidates}:
+                    candidates.append(sc)
+                    if len(candidates) >= max_candidates:
+                        break
 
     # Prioritize candidates by source tier (A6: official first, then reputable, then unknown)
     tier_priority = {"official": 0, "reputable": 1, "unknown": 2}

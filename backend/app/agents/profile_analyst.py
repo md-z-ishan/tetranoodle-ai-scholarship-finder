@@ -20,7 +20,7 @@ from typing import Any, List, Optional, Set, Tuple
 from app.events import AgentEvent
 from app.schemas import ExtraInputs, FieldConfidenceScore, Project, StudentProfile
 from app.tools.github_tool import github_tool
-from app.tools.llm import llm_client
+from app.tools.llm import QuotaExhaustedError, llm_client
 from app.tools.pdf_tool import pdf_tool
 from app.tools.telemetry import EmitCallback, Telemetry
 
@@ -154,6 +154,136 @@ def compute_missing_fields_and_confidence(
     return missing, confidence_list
 
 
+# ---------------------------------------------------------------------------
+# Deterministic fallback profile builder (Phase 8)
+# ---------------------------------------------------------------------------
+
+# Patterns used for regex extraction — all generic, no student-specific values
+_CGPA_PATTERN = re.compile(
+    r"(?:CGPA|GPA|CPI|SGPA|cumulative\s+grade\s+point)[\s:]*([0-9]+\.?[0-9]*)\s*/\s*([0-9]+\.?[0-9]*)",
+    re.IGNORECASE,
+)
+_NAME_PATTERN = re.compile(
+    r"^([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){1,3})",
+    re.MULTILINE,
+)
+_DEGREE_KEYWORDS = {
+    "bachelor": "Bachelor", "b.tech": "B.Tech", "btech": "B.Tech",
+    "b.e": "B.E.", "b.sc": "B.Sc.", "bsc": "B.Sc.",
+    "master": "Master", "m.tech": "M.Tech", "mtech": "M.Tech",
+    "m.sc": "M.Sc.", "msc": "M.Sc.", "phd": "PhD", "ph.d": "PhD",
+    "m.b.a": "MBA", "mba": "MBA",
+}
+_FIELD_KEYWORDS = [
+    "computer science", "artificial intelligence", "machine learning",
+    "electrical engineering", "electronics", "mechanical engineering",
+    "civil engineering", "information technology", "data science",
+    "biotechnology", "biosciences", "bioinformatics", "chemistry",
+    "physics", "mathematics", "economics", "commerce", "business",
+    "management", "finance", "environmental science",
+]
+_NATIONALITY_KEYWORDS = [
+    "indian", "nigeria", "kenya", "ghana", "bangladesh", "pakistan",
+    "sri lanka", "nepal", "myanmar", "vietnam", "indonesia",
+]
+
+
+def build_deterministic_profile(
+    resume_text: str,
+    marksheet_text: str,
+    extra_inputs: Optional["ExtraInputs"] = None,
+) -> StudentProfile:
+    """Construct a best-effort StudentProfile from raw PDF text without LLM.
+
+    Every extracted field is tagged in source_notes with extraction method.
+    Missing fields are left null — values are NEVER invented.
+    This is explicitly marked as a DETERMINISTIC FALLBACK, not full LLM analysis.
+    """
+    corpus = f"{resume_text}\n{marksheet_text}"
+    corpus_lower = corpus.lower()
+
+    profile = StudentProfile(
+        source_notes=["[DETERMINISTIC FALLBACK] LLM synthesis unavailable (API quota exhausted). "
+                      "Fields extracted by pattern-matching from raw document text. "
+                      "Accuracy lower than full LLM analysis."]
+    )
+
+    # --- Name (first multi-word capitalized line in resume) ---
+    name_match = _NAME_PATTERN.search(resume_text.strip())
+    if name_match:
+        candidate_name = name_match.group(1).strip()
+        # Sanity: reject very short or all-caps words (likely a header)
+        words = candidate_name.split()
+        if 2 <= len(words) <= 4 and all(w[0].isupper() and not w.isupper() for w in words):
+            profile.name = candidate_name
+            profile.source_notes.append(f"Name extracted by regex from first line of resume.")
+
+    # --- CGPA ---
+    cgpa_match = _CGPA_PATTERN.search(corpus)
+    if cgpa_match:
+        try:
+            profile.cgpa = float(cgpa_match.group(1))
+            profile.cgpa_scale = float(cgpa_match.group(2))
+            profile.source_notes.append(
+                f"CGPA extracted by pattern: {profile.cgpa}/{profile.cgpa_scale}"
+            )
+        except ValueError:
+            pass
+
+    # --- Degree ---
+    for kw, normalized in _DEGREE_KEYWORDS.items():
+        if kw in corpus_lower:
+            profile.degree = normalized
+            profile.source_notes.append(f"Degree keyword '{kw}' found in documents.")
+            break
+
+    # --- Field ---
+    for fkw in _FIELD_KEYWORDS:
+        if fkw in corpus_lower:
+            profile.field = fkw.title()
+            profile.source_notes.append(f"Field keyword '{fkw}' found in documents.")
+            break
+
+    # --- Nationality ---
+    for nkw in _NATIONALITY_KEYWORDS:
+        if nkw in corpus_lower:
+            profile.nationality = nkw.title()
+            profile.source_notes.append(f"Nationality keyword '{nkw}' found in documents.")
+            break
+
+    # --- Apply ExtraInputs overrides (same logic as LLM path) ---
+    if extra_inputs:
+        if extra_inputs.target_countries:
+            profile.target_countries = extra_inputs.target_countries
+            profile.source_notes.append("Target countries from form input.")
+        if extra_inputs.budget_note:
+            profile.budget_note = extra_inputs.budget_note
+        if extra_inputs.target_degree_level:
+            profile.target_degree_level = extra_inputs.target_degree_level
+        elif extra_inputs.degree_level:
+            profile.target_degree_level = extra_inputs.degree_level
+        if extra_inputs.nationality and not profile.nationality:
+            profile.nationality = extra_inputs.nationality
+        if extra_inputs.intended_field and not profile.field:
+            profile.field = extra_inputs.intended_field
+        if extra_inputs.github_url:
+            profile.github_url = extra_inputs.github_url
+        if extra_inputs.linkedin_url:
+            profile.linkedin_url = extra_inputs.linkedin_url
+
+    # Deterministic next-degree derivation
+    if not profile.target_degree_level and profile.degree:
+        deg_lower = profile.degree.lower()
+        if any(kw in deg_lower for kw in ["bachelor", "b.tech", "btech", "b.e", "b.sc", "b.s"]):
+            profile.target_degree_level = "Master"
+            profile.source_notes.append("Target degree derived as 'Master' (next level from Bachelor).")
+        elif any(kw in deg_lower for kw in ["master", "m.tech", "mtech", "msc", "m.sc"]):
+            profile.target_degree_level = "Doctoral / PhD"
+            profile.source_notes.append("Target degree derived as 'PhD' (next level from Master).")
+
+    return profile
+
+
 async def run_profile_analyst(
     resume_source: Optional[Any] = None,
     marksheet_source: Optional[Any] = None,
@@ -249,12 +379,48 @@ async def run_profile_analyst(
         f"{combined_corpus}"
     )
 
-    profile: StudentProfile = await llm_client.generate_json(
-        prompt=extraction_prompt,
-        schema=StudentProfile,
-        system_instruction=SYSTEM_INSTRUCTION,
-        telemetry=telemetry,
-    )
+    llm_synthesis_failed = False
+    try:
+        profile: StudentProfile = await llm_client.generate_json(
+            prompt=extraction_prompt,
+            schema=StudentProfile,
+            system_instruction=SYSTEM_INSTRUCTION,
+            telemetry=telemetry,
+        )
+    except QuotaExhaustedError as qe:
+        llm_synthesis_failed = True
+        logger.warning("ProfileAnalyst: LLM quota exhausted — falling back to deterministic extraction. %s", qe)
+        if telemetry:
+            telemetry.record_failure(
+                "profile_analyst_llm",
+                error=f"QuotaExhausted: {str(qe)[:200]}",
+                fatal=False,
+            )
+        if emit:
+            await emit(AgentEvent(
+                run_id=run_id,
+                agent="ProfileAnalyst",
+                message=(
+                    "LLM synthesis unavailable (API quota exhausted). "
+                    "Using deterministic pattern extraction. "
+                    "Profile accuracy is reduced — some fields may be missing."
+                ),
+                level="warn",
+            ))
+        profile = build_deterministic_profile(resume_text, marksheet_text, extra_inputs)
+    except Exception as exc:
+        llm_synthesis_failed = True
+        logger.error("ProfileAnalyst: LLM synthesis failed with unexpected error — deterministic fallback. %s", exc)
+        if telemetry:
+            telemetry.record_failure("profile_analyst_llm", error=str(exc)[:200], fatal=False)
+        if emit:
+            await emit(AgentEvent(
+                run_id=run_id,
+                agent="ProfileAnalyst",
+                message=f"LLM synthesis failed ({type(exc).__name__}). Using deterministic extraction (reduced accuracy).",
+                level="warn",
+            ))
+        profile = build_deterministic_profile(resume_text, marksheet_text, extra_inputs)
 
     # Step 4: Merge Form Overrides (ExtraInputs) & Derive Target Degree Level
     if extra_inputs:

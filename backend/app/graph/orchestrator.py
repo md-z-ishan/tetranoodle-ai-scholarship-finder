@@ -37,6 +37,7 @@ from app.schemas import (
     StudentProfile,
     VerifiedOpportunity,
 )
+from app.tools.llm import QuotaExhaustedError
 from app.tools.telemetry import EmitCallback, Telemetry
 
 
@@ -443,6 +444,78 @@ async def node_critic(state: SwarmState) -> Dict[str, Any]:
 # Node 7: Finalize & RunResult Compilation
 # ---------------------------------------------------------------------------
 
+def build_executive_summary(state: dict) -> str:
+    """Compose a truthful executive summary from actual run-state values.
+
+    Never claims success when recommendations are empty.
+    Explicitly reports quota/timeout constraints and partial verification counts.
+    """
+    parts: list[str] = []
+
+    # Profile extraction quality
+    profile_dict = state.get("profile") or {}
+    profile_name = profile_dict.get("name") or "the candidate"
+    source_notes = profile_dict.get("source_notes") or []
+    deterministic_fallback = any("DETERMINISTIC FALLBACK" in n for n in source_notes)
+    if deterministic_fallback:
+        parts.append(
+            f"Profile for {profile_name} was extracted using deterministic pattern-matching "
+            "(LLM synthesis was unavailable due to API quota exhaustion). "
+            "Profile accuracy is reduced; some fields may be missing or incorrect."
+        )
+    else:
+        parts.append(f"Profile for {profile_name} was fully synthesized from uploaded documents.")
+
+    # Scout discovery
+    candidates = state.get("candidates") or []
+    n_candidates = len(candidates)
+    if n_candidates:
+        parts.append(f"{n_candidates} scholarship candidate(s) were discovered by the Scout agent.")
+    else:
+        parts.append("No scholarship candidates were discovered.")
+
+    # Verifier outcomes
+    verified = state.get("verified") or []
+    if verified:
+        n_ver = sum(1 for v in verified if isinstance(v, dict) and v.get("status") == "verified")
+        n_par = sum(1 for v in verified if isinstance(v, dict) and v.get("status") == "partial")
+        n_rej = sum(1 for v in verified if isinstance(v, dict) and v.get("status") == "rejected")
+        n_unv = sum(1 for v in verified if isinstance(v, dict) and v.get("status") == "unverified")
+        parts.append(
+            f"Verification: {n_ver} fully verified, {n_par} partial, "
+            f"{n_rej} rejected, {n_unv} unverified (evidence not retrieved)."
+        )
+    elif n_candidates:
+        parts.append(
+            "Verification was not completed — the verifier agent did not finish within the run timeout. "
+            f"All {n_candidates} discovered candidates remain unverified."
+        )
+
+    # Ranking and SOP
+    recommendations = state.get("recommendations") or []
+    n_recs = len(recommendations)
+    if n_recs:
+        parts.append(f"Ranker produced {n_recs} viable recommendation(s) for the student.")
+        draft = state.get("draft")
+        if draft:
+            parts.append("A tailored Statement of Purpose draft was generated for the top recommendation.")
+        else:
+            parts.append("SOP draft was not generated (writer did not execute or failed).")
+    else:
+        parts.append(
+            "No ranked recommendations were produced. "
+            "This may be because no candidates survived the viability filter, "
+            "or because the verifier did not complete before the run timeout."
+        )
+
+    # Quota / timeout flags from run_health / telemetry events
+    warnings = state.get("warnings") or []
+    if warnings:
+        parts.append("Warnings: " + " | ".join(str(w) for w in warnings[:3]))
+
+    return " ".join(parts)
+
+
 async def node_finalize(state: SwarmState) -> Dict[str, Any]:
     run_id = state.get("run_id", "run-default")
     emit, telemetry = get_context(run_id)
@@ -481,7 +554,7 @@ async def node_finalize(state: SwarmState) -> Dict[str, Any]:
         verified=verified,
         recommendations=recommendations,
         draft=draft,
-        executive_summary=state.get("executive_summary") or "Swarm pipeline complete.",
+        executive_summary=state.get("executive_summary") or build_executive_summary(state),
         what_we_could_not_verify=state.get("what_we_could_not_verify", []),
         needs_from_student=state.get("needs_from_student", []),
         warnings=state.get("warnings", []),
