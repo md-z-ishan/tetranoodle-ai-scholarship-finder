@@ -66,8 +66,25 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Verify service health at:
+- `http://localhost:8000/` -> Interactive Consultant-Grade Web Application
 - `http://localhost:8000/health` -> `{"status": "ok"}`
 - `http://localhost:8000/docs` -> Interactive OpenAPI documentation
+
+---
+
+## 💻 Web Application Dashboard
+
+The frontend is a single-page application served directly by FastAPI at `/`:
+
+- **Student Profile Panel (Left)**: Drag-and-drop PDF upload for resume and transcripts with 10MB validation, interactive country chips with emoji flags, target degree selector, and a "New Student" one-click form reset.
+- **Agent Swarm Arena (Center)**: Seven live agent lanes (Orchestrator, Profile Analyst, Scout, Verifier, Ranker, Writer, Critic) with animated state badges, lit handoff connectors, Writer-Critic revision loop counters, and a color-coded event feed with auto-scroll and pause-on-hover.
+- **Swarm Intelligence Results (Right)**:
+  - **Top Matches**: Ranked recommendation cards with score dials (0–100), transparent 4-part breakdown (fit, funding, urgency, risk), official source links, and verbatim evidence snippets.
+  - **SOP Draft**: Grounded Statement of Purpose with a "Draft only - not submitted" watermark, copy button, and Critic audit trail.
+  - **All Candidates**: Filterable table showing all discovered candidates with source tiers, statuses, and explicit real rejection reasons.
+  - **Run Health**: Real-time observability dashboard displaying LLM calls, cache hits, retries, fetch distribution, and per-agent latency bars.
+  - **History Drawer**: Access past runs directly from disk with instant result loading without re-executing.
+
 
 ---
 
