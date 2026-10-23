@@ -95,12 +95,21 @@ async def plan_queries(
         f"(e.g., do NOT search for secondary school or polytechnic diplomas when target is Master's)."
     )
 
-    plan_res: QueryPlanList = await llm_client.generate_json(
-        prompt=plan_prompt,
-        schema=QueryPlanList,
-        system_instruction=PLAN_SYSTEM_PROMPT,
-        telemetry=telemetry,
-    )
+    try:
+        plan_res: QueryPlanList = await llm_client.generate_json(
+            prompt=plan_prompt,
+            schema=QueryPlanList,
+            system_instruction=PLAN_SYSTEM_PROMPT,
+            telemetry=telemetry,
+        )
+    except Exception as exc:
+        logger.warning("Scout plan_queries LLM unavailable (%s); using deterministic query planning.", exc)
+        if telemetry:
+            telemetry.record_failure("scout_plan_llm", error=str(exc)[:200], fatal=False)
+        plan_res = QueryPlanList(
+            queries=[],
+            warnings=["LLM query planning unavailable (high demand / quota); generated deterministic targeted queries."]
+        )
 
     # Post-validation: ensure minimum 2 queries per target country with target_level
     if profile.target_countries:
@@ -187,12 +196,28 @@ async def triage_hits_to_candidates(
         f"{hits_text}"
     )
 
-    triage_result: CandidateTriageList = await llm_client.generate_json(
-        prompt=triage_prompt,
-        schema=CandidateTriageList,
-        system_instruction=TRIAGE_SYSTEM_PROMPT,
-        telemetry=telemetry,
-    )
+    try:
+        triage_result: CandidateTriageList = await llm_client.generate_json(
+            prompt=triage_prompt,
+            schema=CandidateTriageList,
+            system_instruction=TRIAGE_SYSTEM_PROMPT,
+            telemetry=telemetry,
+        )
+    except Exception as exc:
+        logger.warning("Scout triage LLM unavailable (%s); falling back to direct search hit triage.", exc)
+        if telemetry:
+            telemetry.record_failure("scout_triage_llm", error=str(exc)[:200], fatal=False)
+        triage_result = CandidateTriageList(
+            candidates=[
+                Opportunity(
+                    name=h.title[:120] if h.title else "University Scholarship Opportunity",
+                    url=h.url,
+                    funding_summary=h.snippet[:250] if h.snippet else "Funding information on official university portal",
+                    source_snippet=h.snippet,
+                )
+                for h in hits if h.url
+            ]
+        )
 
     # Clean, match URLs, and apply deterministic degree-level filter (A1)
     valid_candidates: List[Opportunity] = []
