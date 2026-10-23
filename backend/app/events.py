@@ -32,6 +32,7 @@ class EventBus:
         self._subscribers: Dict[str, List[asyncio.Queue[Optional[AgentEvent]]]] = {}
         # run_id -> sequential history of all published events (for reconnection & replay)
         self._history: Dict[str, List[AgentEvent]] = {}
+        self._closed_runs: set[str] = set()
         self._lock = asyncio.Lock()
 
     async def publish(self, event: AgentEvent) -> None:
@@ -63,6 +64,10 @@ class EventBus:
                 for past_event in self._history[run_id]:
                     await queue.put(past_event)
 
+            # If run has already ended, enqueue sentinel None so iterator terminates cleanly
+            if run_id in self._closed_runs:
+                await queue.put(None)
+
         try:
             while True:
                 event = await queue.get()
@@ -80,6 +85,7 @@ class EventBus:
     async def close_run(self, run_id: str) -> None:
         """Signal all subscribers for a run_id that the event stream has ended."""
         async with self._lock:
+            self._closed_runs.add(run_id)
             subscribers = self._subscribers.get(run_id, [])
             for queue in subscribers:
                 await queue.put(None)
@@ -87,6 +93,10 @@ class EventBus:
     def get_history(self, run_id: str) -> List[AgentEvent]:
         """Return full history buffer for a given run_id."""
         return list(self._history.get(run_id, []))
+
+    def replay(self, run_id: str) -> List[AgentEvent]:
+        """Return full history buffer for a given run_id (alias for replay)."""
+        return self.get_history(run_id)
 
 
 # Global event bus singleton instance

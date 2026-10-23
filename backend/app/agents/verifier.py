@@ -498,25 +498,44 @@ async def _verify_one(
             continue
 
         # Degree level comparison
-        degree_keywords = {"master", "msc", "ms", "phd", "bachelor", "undergraduate", "postgraduate"}
+        degree_keywords = ["master", "msc", "ms", "postgraduate", "phd", "doctoral", "bachelor", "undergraduate"]
         for kw in degree_keywords:
             if kw in crit_lower:
-                if profile.degree and kw in profile.degree.lower():
-                    eligibility_met.append(f"Degree level match: {kw}")
-                elif profile.degree:
-                    eligibility_gaps.append(f"Degree mismatch: page requires '{kw}', profile is '{profile.degree}'")
-                else:
-                    needs_from_student.append(f"Degree level needed to verify: {kw}")
+                target_deg = (profile.target_degree_level or "Master").lower()
+                curr_deg = (profile.degree or "").lower()
+                if kw in ["master", "msc", "ms", "postgraduate"]:
+                    if any(t in target_deg for t in ["master", "msc", "ms", "postgraduate"]) or "bachelor" in curr_deg:
+                        eligibility_met.append(f"Degree progression match: {kw} (student target: {profile.target_degree_level or 'Master'})")
+                    else:
+                        eligibility_gaps.append(f"Degree mismatch: page is for '{kw}', student target is '{profile.target_degree_level}'")
+                elif kw in ["phd", "doctoral"]:
+                    if any(t in target_deg for t in ["phd", "doctoral", "research"]):
+                        eligibility_met.append(f"Degree level match: {kw}")
+                    else:
+                        eligibility_gaps.append(f"Degree mismatch: page requires PhD, student target is '{profile.target_degree_level}'")
+                elif kw in ["bachelor", "undergraduate"]:
+                    if is_grad and ("high school" in crit_lower or "diploma" in crit_lower or "undergraduate only" in crit_lower):
+                        eligibility_gaps.append(f"Degree mismatch: page is for pre-degree/undergraduate students, student target is '{profile.target_degree_level}'")
+                    else:
+                        eligibility_met.append(f"Undergraduate credential match: {kw}")
                 break
         else:
             # Can't determine deterministically — use LLM comparison below
             pass
 
-    # LLM-only comparison for criteria we can't check deterministically
+    # Fast deterministic field and general criteria check to conserve rate limits
+    if grounded_eligibility:
+        field_lower = (profile.field or "computer science").lower()
+        for c in grounded_eligibility:
+            c_low = c.lower()
+            if any(term in c_low for term in [field_lower, "stem", "computer", "engineering", "technology", "all fields", "any subject", "open to all", "all disciplines", "merit", "academic excellence"]):
+                eligibility_met.append(f"Criterion aligned: {c}")
+
+    # LLM fallback comparison for remaining complex criteria if any
     if grounded_eligibility and profile.field:
         remaining_criteria = [c for c in grounded_eligibility
-                              if not any(kw in c.lower() for kw in ["gpa", "cgpa", "grade"] + list({"master", "phd", "bachelor"}))]
-        if remaining_criteria:
+                              if not any(kw in c.lower() for kw in ["gpa", "cgpa", "grade", "master", "phd", "bachelor", "stem", "computer", "all fields"])]
+        if remaining_criteria and len(remaining_criteria) <= 3:
             try:
                 class EligibilityResult(BaseModel):
                     met: List[str] = Field(default_factory=list)
@@ -640,11 +659,29 @@ async def run_verifier(
         ))
 
     semaphore = asyncio.Semaphore(concurrency)
+    # Hard per-candidate wall-clock cap — prevents a single 429/503 storm from
+    # blocking all results. 60 s covers: fetch (10 s) + sub-links (10 s) + LLM
+    # with one retry+backoff (30 s) + grounding (5 s) + headroom.
+    _CANDIDATE_TIMEOUT = 60.0
 
     async def _safe_verify(c: Opportunity) -> VerifiedOpportunity:
         async with semaphore:
             try:
-                return await _verify_one(c, profile, run_id, emit, telemetry)
+                return await asyncio.wait_for(
+                    _verify_one(c, profile, run_id, emit, telemetry),
+                    timeout=_CANDIDATE_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Verifier timed-out for %s after %.0fs", c.url, _CANDIDATE_TIMEOUT)
+                if telemetry:
+                    telemetry.record_failure("verifier_timeout", error=f"Candidate timed out after {_CANDIDATE_TIMEOUT}s", fatal=False)
+                return VerifiedOpportunity(
+                    **c.model_dump(),
+                    status="unverified",
+                    rejection_reason=f"Verification timed out after {_CANDIDATE_TIMEOUT}s (likely API rate-limit)",
+                    link_alive=False,
+                    fetched_at=datetime.utcnow().isoformat() + "Z",
+                )
             except Exception as exc:
                 logger.error("Unexpected verifier error for %s: %s", c.url, exc)
                 if telemetry:
@@ -660,28 +697,10 @@ async def run_verifier(
     tasks = [_safe_verify(c) for c in candidates]
     results: List[VerifiedOpportunity] = await asyncio.gather(*tasks)
 
-    # A5: Slow retry pass for candidates that ended unverified due to transient or rate-limit errors
-    retry_targets = [
-        (c, idx) for idx, (c, r) in enumerate(zip(candidates, results))
-        if r.status == "unverified" and any(err in (r.rejection_reason or "").lower() for err in ["429", "quota", "rate", "resource_exhausted", "timeout"])
-    ]
-    if retry_targets:
-        if emit:
-            await emit(AgentEvent(
-                run_id=run_id, agent="Verifier",
-                message=f"Executing slow retry pass for {len(retry_targets[:2])} rate-limited candidates…",
-                level="warn",
-            ))
-        for cand, idx in retry_targets[:2]:
-            await asyncio.sleep(3.0)  # gentle pause for quota recovery
-            try:
-                retried = await _verify_one(cand, profile, run_id, emit, telemetry)
-                if retried.status != "unverified":
-                    results[idx] = retried
-                    if telemetry:
-                        telemetry.record_retry(component="verifier_slow_retry", attempt=2, reason="Recovered from rate limit")
-            except Exception as e:
-                logger.debug("Slow retry failed for %s: %s", cand.url, e)
+    # NOTE: Slow retry pass removed — when the API is rate-limited the extra
+    # 3 s×N sleep only burns time against the global run timeout without
+    # improving outcomes. Candidates that timed out are left as 'unverified'
+    # so the ranker can still surface them as low-confidence results.
 
     # Summary emit
     counts = {"verified": 0, "partial": 0, "unverified": 0, "rejected": 0}

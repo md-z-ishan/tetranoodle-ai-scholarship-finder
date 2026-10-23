@@ -56,17 +56,21 @@ class Telemetry:
 
     def record_fallback(
         self,
-        component: str,
-        from_provider: str,
-        to_provider: str,
-        reason: str,
+        component: str = "general",
+        from_provider: Optional[str] = None,
+        to_provider: Optional[str] = None,
+        reason: str = "",
+        **kwargs: Any,
     ) -> None:
         """Record an automatic fallback to a secondary tool or model."""
+        from_p = from_provider or kwargs.get("primary_tool") or "primary"
+        to_p = to_provider or kwargs.get("fallback_tool") or "fallback"
+        comp = component if component != "general" else (kwargs.get("component") or "general")
         entry = {
             "type": "fallback",
-            "component": component,
-            "from_provider": from_provider,
-            "to_provider": to_provider,
+            "component": comp,
+            "from_provider": from_p,
+            "to_provider": to_p,
             "reason": str(reason),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
